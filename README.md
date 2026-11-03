@@ -108,7 +108,7 @@ That's it. From now on, every night Agouti:
 
 A timer can't tell you that it stopped running, so the healthcheck matters. [healthchecks.io](https://healthchecks.io) is free, or self-host it: create a check with period 1 day and grace 1 hour. The ping URL is kept in the root-only `credentials.env`, because anyone holding it could send fake "all good" pings.
 
-Coming soon: every week it restores the latest backup into a throwaway database and checks it.
+Every week it also restores the latest backup for real and checks it (see [Verified backups](#verified-backups)).
 
 ## See how things stand
 
@@ -250,13 +250,26 @@ repository: s3:https://<id>.r2.cloudflarestorage.com/backups
 
 ## Verified backups
 
-A backup you have never restored is a guess. Agouti checks, on a schedule:
+A backup you have never restored is a guess. Once a week (with the scheduled backup), or whenever you run `sudo agouti verify`, Agouti restores the latest restore point of each app for real:
 
-- **Database:** restores into a throwaway database and checks that tables and row counts look right. You can add your own checks.
-- **Files:** downloads a sample of files and compares checksums.
-- **References:** optionally, runs a query that lists the file paths your database points to, and confirms every one of them is in the same restore point.
+- **Database:** loaded into a throwaway database (`agouti_verify_shop`), then every table's rows are counted, and the database is dropped.
+- **Files:** a random sample is restored. Each file is checked for size, and compared byte for byte with the live file when that file hasn't changed since the backup.
+- **Repository:** `restic check` confirms its structure is intact.
+- **Compared with last week:** a backup can restore perfectly and still hold the wrong thing. If a table lost most of its rows, a table disappeared, or most files are gone, you get a warning, and the healthcheck reports a failure.
 
-Each restore point is marked `✓ verified`, `⚠ unverified` or `✕ failed`.
+```sh
+$ sudo agouti verify
+✓ Repository: no errors
+
+Testing shop: restore point 2026-11-03 03:00 (UTC) ...
+  ✓ database  62 tables · 1,198,870 rows · 2 views · 1 procedure restored · 41s
+  ✓ files     20 of 17,420 files restored · 18 identical to the live copy · 3s
+✓ shop: backup verified
+```
+
+The throwaway database is created by a MySQL user Agouti sets up once, `agouti_verify`. It can **only create and drop databases named `agouti_verify_*`**, so it can't read or change your real databases. Agouti creates it with root through the local socket, or with an admin you give once and that isn't saved.
+
+With binary logging on (the MySQL 8 default), MySQL only lets SUPER users create triggers and stored functions, so those are checked in the dump instead of loaded. Everything else is loaded. The home screen shows each app's last result: `✓ verified`, `⚠ looks wrong` or `✕ failed`.
 
 ## Security
 
@@ -278,8 +291,8 @@ Agouti backs up **the apps running on your server**: their databases and their f
 
 ## Roadmap
 
-- **v0.1:** detect → back up (database + files) → schedule → retention → healthcheck → restore (full, database, files, single file)
-- **v0.2:** restore verification, including the reference check · status TUI
+- **v0.1:** detect → back up (database + files) → schedule → retention → healthcheck → restore (full, database, files, single file) → restore on a new server → weekly restore tests
+- **v0.2:** the reference check (files your database points to) · status TUI
 - **Later:** point-in-time recovery from binlogs · `mydumper` for large databases · dumps from a replica · Postgres · backing up S3-hosted uploads · single binary and Docker image
 
 ## Related

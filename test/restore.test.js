@@ -15,11 +15,11 @@ import { restoreFlow } from "../src/flows/restore.js";
 import { applyRetention } from "../src/retention.js";
 import { copyDatabaseName, discoverApps, listPoints, restoreApp, restoreFilesByPath } from "../src/restore.js";
 import { ensureRestic, resticEnv } from "../src/restic.js";
-import { captured, laravelFixture, scripted } from "./helpers.js";
+import { FAKE_DUMP, captured, installFakeMysql, laravelFixture, scripted } from "./helpers.js";
 
 const CACHE = fileURLToPath(new URL("./.cache", import.meta.url));
 const BIN = fileURLToPath(new URL("../bin/agouti.js", import.meta.url));
-const DUMP = "-- fake dump\nCREATE TABLE `users` (id int);\nINSERT INTO `users` VALUES (1);\nCREATE TABLE `orders` (id int);\n";
+const DUMP = FAKE_DUMP;
 let restic;
 let dbDir; // the stand-in MySQL server's data
 
@@ -30,44 +30,7 @@ before(async () => {
   } catch (err) {
     console.warn(`skipping restore tests: ${err.message}`);
   }
-  const dir = await mkdtemp(join(tmpdir(), "agouti-fakemysql-"));
-  await writeFile(join(dir, "mysqldump"), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "mysqldump  Ver 8.4"; exit 0; fi\nprintf '%s' '${DUMP}'\n`);
-  await chmod(join(dir, "mysqldump"), 0o755);
-  process.env.AGOUTI_MYSQLDUMP = join(dir, "mysqldump");
-
-  // mysql: -e SQL runs a statement; without -e, loads stdin into the database named last.
-  await writeFile(
-    join(dir, "mysql"),
-    `#!/usr/bin/env node
-const fs = require("fs"), path = require("path");
-const args = process.argv.slice(2);
-const DATA = process.env.FAKE_MYSQL_DATA;
-const cnf = fs.readFileSync(args[0].replace("--defaults-extra-file=", ""), "utf8");
-if (cnf.includes('password="wrong"')) { console.error("ERROR 1045 (28000): Access denied for user 'root'@'localhost'"); process.exit(1); }
-const e = args.indexOf("-e");
-const db = (name) => path.join(DATA, name);
-if (e === -1) {
-  const target = args.at(-1);
-  if (!fs.existsSync(db(target))) { console.error("ERROR 1049 (42000): Unknown database '" + target + "'"); process.exit(1); }
-  const sql = fs.readFileSync(0, "utf8");
-  if (process.env.FAKE_LOAD_FAIL) { console.error("ERROR 1064 (42000) at line 2: You have an error in your SQL syntax"); process.exit(1); }
-  fs.writeFileSync(path.join(db(target), "data.sql"), sql);
-  process.exit(0);
-}
-const sql = args[e + 1];
-const name = (re) => (sql.match(re) || [])[1];
-if (/CURRENT_USER/.test(sql)) console.log("root@localhost");
-else if (/DEFAULT_CHARACTER_SET_NAME/.test(sql)) { const n = name(/SCHEMA_NAME = '([^']+)'/); if (fs.existsSync(db(n))) console.log("utf8mb4\\tutf8mb4_unicode_ci"); }
-else if (/SELECT 1 FROM information_schema.SCHEMATA/.test(sql)) { if (fs.existsSync(db(name(/SCHEMA_NAME = '([^']+)'/)))) console.log(1); }
-else if (/information_schema.TABLES/.test(sql)) { const f = path.join(db(name(/TABLE_SCHEMA = '([^']+)'/)), "data.sql"); console.log(fs.existsSync(f) ? (fs.readFileSync(f, "utf8").match(/^CREATE TABLE \`/gm) || []).length : 0); }
-else {
-  const drop = name(/DROP DATABASE IF EXISTS \`([^\`]+)\`/); if (drop) fs.rmSync(db(drop), { recursive: true, force: true });
-  const create = name(/CREATE DATABASE (?:IF NOT EXISTS )?\`([^\`]+)\`/); if (create) fs.mkdirSync(db(create), { recursive: true });
-}
-`,
-  );
-  await chmod(join(dir, "mysql"), 0o755);
-  process.env.AGOUTI_MYSQL = join(dir, "mysql");
+  await installFakeMysql();
 });
 
 async function setup() {

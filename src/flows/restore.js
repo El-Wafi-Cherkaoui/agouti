@@ -118,9 +118,9 @@ export async function askAdmin(ask, project, p) {
     if (!(err instanceof UserError) || /isn't installed/.test(err.message)) throw err;
   }
   info(`
-Restoring a database needs a MySQL user that can create databases. Logging in
-as root through the local socket didn't work, so give one (and its server).
-The password is only used for this restore and isn't saved.
+This needs a MySQL admin that can create databases. Logging in as root through
+the local socket didn't work, so give one (and its server). The password is
+only used right now and isn't saved.
 `);
   const db = project.database;
   for (;;) {

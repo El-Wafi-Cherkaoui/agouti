@@ -25,7 +25,14 @@ export async function loadState(p = paths()) {
 export async function recordBackup(name, result, p = paths()) {
   const state = await loadState(p);
   const prev = state.projects[name] ?? {};
-  state.projects[name] = { lastBackup: result, lastSuccess: result.ok ? result : prev.lastSuccess };
+  state.projects[name] = { ...prev, lastBackup: result, lastSuccess: result.ok ? result : prev.lastSuccess };
+  await writeAtomic(stateFile(p), JSON.stringify(state, null, 2) + "\n", 0o644);
+}
+
+// The latest restore test of an app (see verify.js).
+export async function recordVerify(name, result, p = paths()) {
+  const state = await loadState(p);
+  state.projects[name] = { ...(state.projects[name] ?? {}), lastVerify: result };
   await writeAtomic(stateFile(p), JSON.stringify(state, null, 2) + "\n", 0o644);
 }
 

@@ -7,6 +7,7 @@ import { addFlow } from "./flows/add.js";
 import { runBackup } from "./flows/backup.js";
 import { offerBringBack } from "./flows/adopt.js";
 import { restoreFlow } from "./flows/restore.js";
+import { verifyFlow, verifyLabel } from "./flows/verify.js";
 import { printStatus, scheduleFlow } from "./flows/schedule.js";
 import { loadConfig } from "./config.js";
 import { loadHealthcheck } from "./healthcheck.js";
@@ -94,8 +95,11 @@ async function home(config, ask, p) {
   const state = await loadState(p);
   info(`\n${bold("agouti")} · ${apps.length} ${apps.length === 1 ? "app" : "apps"} · repo: ${describeRepository(config.repository)}`);
   if (apps.length === 0) info(dim("No apps yet. Add your first one to start backing up."));
-  else info(dim(`  ${"APP".padEnd(14)}LAST BACKUP`));
-  for (const [name] of apps) info(`  ${bold(name.padEnd(14))}${lastBackupLabel(state.projects[name])}`);
+  else info(dim(`  ${"APP".padEnd(14)}${"LAST BACKUP".padEnd(LABEL)}RESTORE TEST`));
+  for (const [name] of apps) {
+    const s = state.projects[name];
+    info(`  ${bold(name.padEnd(14))}${padVisible(lastBackupLabel(s), LABEL)}${verifyLabel(s?.lastVerify, Boolean(config.verify))}`);
+  }
   const schedule = await scheduleStatus(config);
   if (apps.length) {
     info("");
@@ -116,20 +120,30 @@ async function home(config, ask, p) {
     message: "What do you want to do?",
     pageSize: 12,
     choices: [
-      // Working actions first, so the cursor never starts on something unavailable;
-      // the most likely next step first.
+      // The most likely next step first. Nothing disabled, so the cursor never lands on it.
       ...(apps.length
         ? schedule.enabled && !schedule.problem
           ? [backupChoice, addChoice, scheduleChoice]
           : [backupChoice, scheduleChoice, addChoice]
         : [addChoice]),
-      { value: "check", name: "Check storage", description: "Make sure this server can still reach the repository." },
-      { value: "key", name: "Show recovery key", description: "In case you didn't save it during setup." },
       {
         value: "restore",
         name: "Restore",
         description: apps.length ? "A database, files or a single file, as a copy or in place." : "Bring back apps from the backups (e.g. on a new server).",
       },
+      ...(apps.length
+        ? [
+            {
+              value: "verify",
+              name: "Test a restore",
+              description: config.verify
+                ? "Restore the latest backups for real, check them, delete them again."
+                : "Prove backups can be restored. Set up once, then weekly.",
+            },
+          ]
+        : []),
+      { value: "check", name: "Check storage", description: "Make sure this server can still reach the repository." },
+      { value: "key", name: "Show recovery key", description: "In case you didn't save it during setup." },
       { value: "quit", name: "Quit" },
     ],
   });
@@ -140,6 +154,7 @@ async function home(config, ask, p) {
     if (action === "add") await addFlow(ask, { p });
     if (action === "schedule") await scheduleFlow(ask, { p });
     if (action === "restore") await restoreFlow(ask, { p });
+    if (action === "verify") await verifyFlow(ask, { p });
     if (action === "check") await checkStorage(config, p);
     if (action === "key") await showKey(ask, p);
   } catch (err) {
@@ -159,6 +174,10 @@ async function backupNow(ask, apps, p) {
   }
   await runBackup(names, { p });
 }
+
+const LABEL = 30;
+// Pads to a visible width, ignoring colour codes.
+const padVisible = (text, width) => text + " ".repeat(Math.max(1, width - text.replace(/\x1b\[[0-9;]*m/g, "").length));
 
 export function lastBackupLabel(s) {
   const last = s?.lastBackup;

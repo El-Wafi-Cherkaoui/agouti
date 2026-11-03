@@ -6,7 +6,8 @@ import { loadHealthcheck, ping, saveHealthcheck, validateHealthcheckUrl } from "
 import { paths } from "../paths.js";
 import { DEFAULT_RETENTION } from "../retention.js";
 import { SERVICE, TIMER, agoutiCommand, installSchedule, parseTime, removeSchedule, scheduleStatus, serverTimezone } from "../schedule.js";
-import { bold, dim, green, info, ok, red, warn, yellow } from "../ui.js";
+import { UserError, bold, dim, green, info, ok, red, warn, yellow } from "../ui.js";
+import { explainVerify, setupVerifyFlow } from "./verify.js";
 
 export async function scheduleFlow(ask, { p = paths() } = {}) {
   const config = await requireConfig(p);
@@ -55,6 +56,18 @@ It runs as a systemd timer (${TIMER}) on this server.
   const time = await askTime(ask, "03:00");
   let url = await loadHealthcheck(p);
   if (!url) url = await askHealthcheck(ask, p);
+  if (!config.verify) {
+    explainVerify();
+    if (await ask.confirm({ message: "Set up weekly restore tests? (recommended)", default: true })) {
+      try {
+        await setupVerifyFlow(ask, { p, explained: true });
+        Object.assign(config, { verify: (await requireConfig(p)).verify });
+      } catch (err) {
+        if (!(err instanceof UserError)) throw err;
+        warn(`Restore tests not set up: ${err.message}`);
+      }
+    } else warn("No restore tests: you won't know if backups can't be restored until you need one.");
+  }
   config.retention ??= { ...DEFAULT_RETENTION };
   printInstalled(await installSchedule(config, time, { p }), url);
 }
@@ -160,6 +173,7 @@ export function printStatus(status, url, config) {
   if (status.problem) info(`  ${red(status.problem)}`);
   else if (status.nextRun) info(dim(`  next: ${status.nextRun}`));
   info(dim(`  keeps ${policy.daily} daily, ${policy.weekly} weekly, ${policy.monthly} monthly restore points`));
+  info(config.verify ? dim("  restore test: weekly") : `  ${yellow("⚠")} no restore tests: set them up with "Test a restore"`);
   info(url ? dim(`  healthcheck: ${maskUrl(url)}`) : `  ${yellow("⚠")} no healthcheck: if backups stop, nothing will tell you`);
 }
 

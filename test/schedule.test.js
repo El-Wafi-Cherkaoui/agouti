@@ -248,11 +248,13 @@ test("interactive: turn on with a healthcheck, then turn off", async (t) => {
     ["input", /Back up every day at/, "4:30"],
     ["select", /Set up a healthcheck/, "yes"],
     ["input", /Ping URL/, hc.url],
+    ["confirm", /Set up weekly restore tests/, false],
   ]);
   const out = await captured(() => scheduleFlow(ask, { p }));
   assert.equal(ask.remaining.length, 0);
   assert.match(out, /keeps the last 7 days,\s+4 weeks and 12 months/);
   assert.match(out, /Test ping sent/);
+  assert.match(out, /No restore tests: you won't know if backups can't be restored/);
   assert.match(out, /Daily backups at 04:30/);
   assert.match(out, /Healthcheck: 127\.0\.0\.1:\d+\/ping\/abc\. You.ll be alerted/);
   assert.equal(await loadHealthcheck(p), hc.url);

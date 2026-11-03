@@ -7,6 +7,9 @@ import { loadHealthcheck, ping } from "../healthcheck.js";
 import { paths } from "../paths.js";
 import { DEFAULT_RETENTION, applyRetention } from "../retention.js";
 import { ensureRestic, resticEnv } from "../restic.js";
+import { loadState } from "../state.js";
+import { verifyDue } from "../verify.js";
+import { runVerify, verifySummary } from "./verify.js";
 import { bold, dim, green, info, red, warn, yellow } from "../ui.js";
 
 export async function runBackup(names = [], { p = paths(), live = process.stdout.isTTY } = {}) {
@@ -48,6 +51,21 @@ export async function scheduledBackup(names = [], { p = paths() } = {}) {
       ok = false;
       info(`${red("✕")} ${err.message}`);
       report.push(`Retention FAILED: ${err.message}`);
+    }
+
+    // The weekly restore test, in the same run so the healthcheck hears about it.
+    // "Restores but looks wrong" counts as a failure here: that's what should alert.
+    if (!config.verify) report.push("Restore tests: not set up (sudo agouti → Test a restore)");
+    else if (verifyDue(config, await loadState(p))) {
+      try {
+        const v = await runVerify([], { p, live: false });
+        report.push(...verifySummary(v));
+        if (!v.ok) ok = false;
+      } catch (err) {
+        ok = false;
+        info(`${red("✕")} Restore test: ${err.message}`);
+        report.push(`Restore test FAILED: ${err.message}`);
+      }
     }
   } catch (err) {
     // Not set up, no apps, another backup running...: the healthcheck must hear about it too.

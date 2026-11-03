@@ -7,6 +7,7 @@ import * as connect from "./commands/connect.js";
 import * as init from "./commands/init.js";
 import * as restore from "./commands/restore.js";
 import * as schedule from "./commands/schedule.js";
+import * as verify from "./commands/verify.js";
 import { UserError, dim, red } from "./ui.js";
 
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -29,6 +30,7 @@ const COMMANDS = {
     summary: "Back up every app automatically, every day",
     root: true,
   },
+  verify: { run: verify.verify, usage: verify.usage, options: verify.options, summary: "Test that backups can really be restored", root: true },
   connect: { run: connect.connect, usage: connect.usage, options: connect.options, summary: "Use an existing repository, e.g. on a new server", root: true },
 };
 

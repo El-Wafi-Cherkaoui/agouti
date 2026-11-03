@@ -5,13 +5,14 @@
 //   replace  the live database and folders are replaced. A safety restore point
 //            of the current state is made first, so a replace can be undone.
 // No printing here: progress and results go to onEvent.
-import { shield, spawn, stopAll } from "./children.js";
+import { shield, stopAll } from "./children.js";
+import { loadDump } from "./dump.js";
 import { existsSync, rmSync } from "node:fs";
 import { mkdir, readdir, rm, statfs } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { APP_FILE, backupApps } from "./backup.js";
 import { requireConfig, writeAtomic } from "./config.js";
-import { cleanError, id, mysqlClient, optionFileContent, query, str } from "./mysql.js";
+import { id, optionFileContent, query, str } from "./mysql.js";
 import { paths } from "./paths.js";
 import { ensureRestic, resticEnv, run, runJson } from "./restic.js";
 import { acquireLock, lockFile } from "./state.js";
@@ -330,7 +331,7 @@ async function restoreDatabase(point, project, { bin, env, admin, mode, onEvent 
 
   let loaded;
   try {
-    loaded = await pipeDump(point.database, target, { bin, env, admin, onEvent });
+    loaded = await loadDump(point.database, target, { bin, env, optionFile: admin.file, onEvent });
   } catch (err) {
     if (mode === "copy")
       await query(admin.file, `DROP DATABASE IF EXISTS ${id(target)}`); // don't leave a half copy behind
@@ -347,47 +348,6 @@ async function restoreDatabase(point, project, { bin, env, admin, mode, onEvent 
     bytes: loaded.bytes,
     ...(ok ? {} : { error: `Only ${tables} of ${loaded.tables} tables are in ${target}.` }),
   };
-}
-
-// restic dump | mysql, counting the tables in the dump on the way through.
-function pipeDump(part, database, { bin, env, admin, onEvent }) {
-  return new Promise((resolve, reject) => {
-    const dump = spawn(bin, ["dump", part.snapshot, part.path], { env, stdio: ["ignore", "pipe", "pipe"] });
-    const mysql = spawn(mysqlClient(), [`--defaults-extra-file=${admin.file}`, "--default-character-set=utf8mb4", database], {
-      stdio: ["pipe", "ignore", "pipe"],
-    });
-    let dumpErr = "";
-    let mysqlErr = "";
-    let bytes = 0;
-    let tables = 0;
-    let tail = "";
-    dump.stderr.on("data", (d) => (dumpErr += d));
-    mysql.stderr.on("data", (d) => (mysqlErr += d));
-    dump.stdout.on("data", (chunk) => {
-      bytes += chunk.length;
-      // Count complete lines only; the unfinished last line waits for the next chunk.
-      const text = tail + chunk.toString("latin1");
-      const cut = text.lastIndexOf("\n") + 1;
-      tables += (text.slice(0, cut).match(/^CREATE TABLE `/gm) ?? []).length;
-      tail = text.slice(cut);
-      onEvent({ type: "progress", part: "database", bytesDone: bytes, totalBytes: part.bytes ?? 0, percent: part.bytes ? bytes / part.bytes : undefined });
-    });
-    dump.stdout.pipe(mysql.stdin);
-    mysql.stdin.on("error", () => {}); // mysql quit early: its stderr says why
-    let pending = 2;
-    let dumpCode;
-    let mysqlCode;
-    const done = () => {
-      if (--pending) return;
-      if (mysqlCode !== 0) return reject(new UserError(`Loading the dump failed: ${cleanError(mysqlErr) || `exit code ${mysqlCode}`}`));
-      if (dumpCode !== 0) return reject(new UserError(`Reading the backup failed: ${cleanRestic(dumpErr) || `exit code ${dumpCode}`}`));
-      resolve({ bytes, tables });
-    };
-    dump.on("error", reject);
-    mysql.on("error", (e) => reject(e.code === "ENOENT" ? new UserError("The mysql client isn't installed.") : e));
-    dump.on("close", (code) => ((dumpCode = code), done()));
-    mysql.on("close", (code) => ((mysqlCode = code), done()));
-  });
 }
 
 async function restoreFiles(point, project, { bin, env, mode, origin, target, onEvent }) {
