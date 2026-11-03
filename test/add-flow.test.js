@@ -59,6 +59,7 @@ test("reading .env: explained first, then only DB settings saved, password in a 
     ],
     ["input", /Other folders/, ""],
     ["confirm", /Add shop/, true],
+    ["confirm", /first backup/, false],
   ]);
   const out = await captured(() => addFlow(ask, { p, dir }));
   assert.deepEqual(ask.remaining, []);
@@ -107,6 +108,7 @@ test("read-only backup user: SQL shown, failed connection fixed in place", async
     ["checkbox", /Which folders/, ["storage/app/public"]],
     ["input", /Other folders/, ""],
     ["confirm", /Add shop/, true],
+    ["confirm", /first backup/, false],
   ]);
   // Make the first attempt fail as if the SQL hadn't been run yet.
   const orig = process.env.AGOUTI_MYSQL;
@@ -157,6 +159,7 @@ test("the same directory or name can't be added twice", async () => {
         ["checkbox", /Which/, []],
         ["input", /Other/, ""],
         ["confirm", /Add/, true],
+        ["confirm", /first backup/, false],
       ]),
       { p, dir },
     );

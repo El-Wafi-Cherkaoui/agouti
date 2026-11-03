@@ -5,13 +5,15 @@ import { readFile } from "node:fs/promises";
 import { Separator } from "@inquirer/prompts";
 import { printCreated } from "./commands/init.js";
 import { addFlow } from "./flows/add.js";
+import { runBackup } from "./flows/backup.js";
 import { loadConfig } from "./config.js";
 import { paths } from "./paths.js";
 import { askRecoveryKey, askStorage, defaultAsk } from "./prompts.js";
 import { normalizeRecoveryKey } from "./recovery-key.js";
 import { connectRepository, createRepository, repositoryStatus } from "./repository.js";
+import { loadState } from "./state.js";
 import { describeRepository } from "./storage.js";
-import { UserError, bold, dim, info, ok, red, warn, yellow } from "./ui.js";
+import { UserError, bold, dim, green, info, ok, red, warn, yellow } from "./ui.js";
 
 export async function app({ ask = defaultAsk, p = paths() } = {}) {
   for (;;) {
@@ -79,25 +81,26 @@ async function connectFlow(ask, p) {
 
 async function home(config, ask, p) {
   const apps = Object.entries(config.projects ?? {});
+  const state = await loadState(p);
   info(`\n${bold("agouti")} · ${apps.length} ${apps.length === 1 ? "app" : "apps"} · repo: ${describeRepository(config.repository)}`);
   if (apps.length === 0) info(dim("No apps yet. Add your first one to start backing up."));
-  for (const [name, project] of apps) {
-    const files = project.files?.length ?? 0;
-    info(`  ${bold(name.padEnd(12))} ${project.path}  ${dim(`database ${project.database?.name ?? "?"} · ${files} ${files === 1 ? "folder" : "folders"}`)}`);
-  }
+  else info(dim(`  ${"APP".padEnd(14)}LAST BACKUP`));
+  for (const [name] of apps) info(`  ${bold(name.padEnd(14))}${lastBackupLabel(state.projects[name])}`);
   info("");
 
+  const backupChoice = { value: "backup", name: "Back up now", description: "Database and files, as one restore point." };
+  const addChoice = { value: "add", name: "Add an app", description: "Back up another app's database and uploaded files." };
   const action = await ask.select({
     message: "What do you want to do?",
-    pageSize: 10,
+    pageSize: 12,
     choices: [
-      // Working actions first, so the cursor never starts on something unavailable.
-      { value: "add", name: "Add an app", description: "Back up another app's database and uploaded files." },
+      // Working actions first, so the cursor never starts on something unavailable;
+      // the most likely next step first.
+      ...(apps.length ? [backupChoice, addChoice] : [addChoice]),
       { value: "check", name: "Check storage", description: "Make sure this server can still reach the repository." },
       { value: "key", name: "Show recovery key", description: "In case you didn't save it during setup." },
       { value: "quit", name: "Quit" },
       new Separator(dim("── Coming soon ──")),
-      { value: "backup", name: "Back up now", disabled: true },
       { value: "restore", name: "Restore", disabled: true },
       { value: "schedule", name: "Schedule automatic backups", disabled: true },
     ],
@@ -105,6 +108,7 @@ async function home(config, ask, p) {
 
   try {
     if (action === "quit") return "quit";
+    if (action === "backup") await backupNow(ask, apps, p);
     if (action === "add") await addFlow(ask, { p });
     if (action === "check") await checkStorage(config, p);
     if (action === "key") await showKey(ask, p);
@@ -112,6 +116,33 @@ async function home(config, ask, p) {
     if (!(err instanceof UserError)) throw err;
     showError(err);
   }
+}
+
+async function backupNow(ask, apps, p) {
+  let names = [];
+  if (apps.length > 1) {
+    const choice = await ask.select({
+      message: "Back up which app?",
+      choices: [{ value: "", name: `All ${apps.length} apps` }, ...apps.map(([name]) => ({ value: name, name }))],
+    });
+    if (choice) names = [choice];
+  }
+  await runBackup(names, { p });
+}
+
+export function lastBackupLabel(s) {
+  const last = s?.lastBackup;
+  if (!last) return dim("never backed up");
+  if (last.ok) return `${green("✓")} ${ago(last.at)}`;
+  const good = s.lastSuccess ? `last good: ${ago(s.lastSuccess.at)}` : "no successful backup yet";
+  return `${red("✕")} failed ${ago(last.at)} ${dim(`(${good})`)}`;
+}
+
+export function ago(iso, now = Date.now()) {
+  const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+  if (s < 60) return "just now";
+  const [n, unit] = s < 3600 ? [Math.round(s / 60), "min"] : s < 86400 ? [Math.round(s / 3600), "h"] : [Math.round(s / 86400), " days"];
+  return unit === " days" && n === 1 ? "yesterday" : `${n}${unit} ago`;
 }
 
 async function checkStorage(config, p) {

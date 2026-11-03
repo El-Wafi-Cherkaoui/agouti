@@ -1,6 +1,7 @@
 import { requireConfig } from "../config.js";
 import { detectApp, fileCandidates, formatBytes, suggestName } from "../detect.js";
 import { readDatabaseSettings } from "../envfile.js";
+import { routinesWarning } from "../mysql.js";
 import { addFlow } from "../flows/add.js";
 import { paths } from "../paths.js";
 import { defaultAsk } from "../prompts.js";
@@ -81,8 +82,10 @@ export async function add({ values, positionals }) {
 
   try {
     const { check } = await prepareDatabase(name, db, p);
-    if (check.ok) ok(`Connected: ${check.version} · ${db.database} · ${check.tables} tables · ${formatBytes(check.bytes)}`);
-    else if (check.clientMissing) warn(check.message);
+    if (check.ok) {
+      ok(`Connected: ${check.version} · ${db.database} · ${check.tables} tables · ${formatBytes(check.bytes)}`);
+      if (!check.routinesVisible) warn(routinesWarning(db.username));
+    } else if (check.clientMissing) warn(check.message);
     else if (values["no-check"]) warn(`Couldn't connect: ${check.message} (saved anyway, --no-check)`);
     else throw new UserError(`Couldn't connect to the database: ${check.message}`, "Fix the details, or pass --no-check to save anyway.");
 

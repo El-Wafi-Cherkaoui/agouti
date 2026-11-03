@@ -2,9 +2,10 @@
 // in a terminal. The non-interactive command calls the same core in projects.js.
 import { join } from "node:path";
 import { requireConfig } from "../config.js";
+import { runBackup } from "./backup.js";
 import { detectApp, dirStats, fileCandidates, findApps, formatBytes, suggestName } from "../detect.js";
 import { readDatabaseSettings } from "../envfile.js";
-import { backupUserSql, generatePassword } from "../mysql.js";
+import { backupUserSql, generatePassword, routinesWarning } from "../mysql.js";
 import { paths } from "../paths.js";
 import { discardDatabase, prepareDatabase, saveProject, validateAppDir, validateFolders, validateName } from "../projects.js";
 import { UserError, bold, dim, info, ok, red, warn, yellow } from "../ui.js";
@@ -43,7 +44,16 @@ export async function addFlow(ask, { p = paths(), dir } = {}) {
     }
     throw err;
   }
-  ok(`Added ${bold(name)}. Back up now and scheduling are coming next in Agouti.`);
+  ok(`Added ${bold(name)}.`);
+  if (await ask.confirm({ message: "Run a first backup now?", default: true })) {
+    try {
+      await runBackup([name], { p });
+    } catch (err) {
+      // The app is saved either way; a failed first backup shouldn't undo that.
+      if (!(err instanceof UserError)) throw err;
+      info(`${red("✕")} ${err.message}`);
+    }
+  }
   return name;
 }
 
@@ -180,6 +190,7 @@ async function connectLoop(ask, name, settings, p) {
     if (check.ok) {
       ok(`Connected: ${check.version} · ${settings.database} · ${check.tables} tables · ${formatBytes(check.bytes)}`);
       if (check.tables === 0) warn("The database has no tables. Is it the right one?");
+      if (!check.routinesVisible) warn(routinesWarning(settings.username));
       return settings;
     }
     if (check.clientMissing) {

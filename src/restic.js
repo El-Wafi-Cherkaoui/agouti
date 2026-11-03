@@ -135,3 +135,35 @@ export function lastLine(text) {
   const lines = text.trim().split("\n").filter(Boolean);
   return lines.at(-1) ?? "";
 }
+
+// Runs restic with --json and hands each parsed message to onMessage as it
+// arrives (status updates, errors, the final summary). Non-JSON lines (such as
+// stderr from a --stdin-from-command program) are collected in `stderr`.
+export function runJson(bin, args, { env = process.env, onMessage = () => {} } = {}) {
+  return new Promise((resolve, reject) => {
+    // --json goes first: anything after "--" belongs to a --stdin-from-command program.
+    const child = spawn(bin, ["--json", ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    const messages = [];
+    let stderr = "";
+    let buf = "";
+    child.stdout.on("data", (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (!line) continue;
+        try {
+          const msg = JSON.parse(line);
+          messages.push(msg);
+          onMessage(msg);
+        } catch {
+          stderr += line + "\n";
+        }
+      }
+    });
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, messages, stderr, summary: messages.findLast((m) => m.message_type === "summary") }));
+  });
+}

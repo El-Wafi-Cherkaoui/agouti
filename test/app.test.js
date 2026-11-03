@@ -47,9 +47,10 @@ test("fresh server: guided setup, insists on saving the key, then the home scree
       "select",
       /What do you want to do/,
       (opts) => {
-        const backup = opts.choices.find((c) => c.value === "backup");
-        assert.ok(backup.disabled, "backup isn't built yet, so it must be shown as unavailable");
-        assert.ok(!opts.choices.find((c) => c.value === "add").disabled);
+        const value = (v) => opts.choices.find((c) => c.value === v);
+        assert.equal(value("backup"), undefined, "nothing to back up before an app is added");
+        assert.ok(!value("add").disabled);
+        assert.ok(value("restore").disabled, "restore isn't built yet, so it must be shown as unavailable");
         return "check";
       },
     ],
