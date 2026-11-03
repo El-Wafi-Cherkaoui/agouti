@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn } from "./children.js";
 import { createHash } from "node:crypto";
 import { access, chmod, constants, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";

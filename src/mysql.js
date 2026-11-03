@@ -1,6 +1,6 @@
 // Talking to MySQL/MariaDB. Credentials always go through a private option file
 // (--defaults-extra-file), never the command line, where `ps` would show them.
-import { spawn } from "node:child_process";
+import { spawn } from "./children.js";
 import { randomBytes } from "node:crypto";
 import { writeAtomic } from "./config.js";
 import { UserError } from "./ui.js";
@@ -23,7 +23,7 @@ export async function writeOptionFile(file, db) {
 // Connects and describes the database: server version, table count, size, and
 // whether this user can see stored procedures/functions (see routinesVisible).
 // Returns { ok: true, version, tables, bytes, routinesVisible } or { ok: false, message }.
-export async function inspectDatabase(optionFile, database, { client = process.env.AGOUTI_MYSQL || "mysql" } = {}) {
+export async function inspectDatabase(optionFile, database, { client = mysqlClient() } = {}) {
   const sql =
     "SELECT VERSION(), COUNT(*), COALESCE(SUM(data_length + index_length), 0) FROM information_schema.tables WHERE table_schema = DATABASE(); SHOW GRANTS";
   const r = await run(client, [`--defaults-extra-file=${optionFile}`, "--batch", "--skip-column-names", "--connect-timeout=10", "-e", sql, database]);
@@ -78,9 +78,35 @@ function describeVersion(v = "") {
   return /mariadb/i.test(v) ? `MariaDB ${num}` : `MySQL ${num}`;
 }
 
-function cleanError(stderr) {
+export function cleanError(stderr) {
   const line = stderr.split("\n").find((l) => /ERROR/.test(l)) ?? stderr.trim().split("\n").at(-1) ?? "unknown error";
   return line.replace(/^(mysql|mariadb): /, "").trim();
+}
+
+// SQL quoting: identifiers (`name`) and strings ('text').
+export const id = (s) => "`" + String(s).replace(/`/g, "``") + "`";
+export const str = (s) => "'" + String(s).replace(/\\/g, "\\\\").replace(/'/g, "''") + "'";
+
+export const mysqlClient = () => process.env.AGOUTI_MYSQL || "mysql";
+
+// Runs SQL with the given option file. Returns { ok, rows: [[...]], error, missing }.
+export async function query(optionFile, sql, { database } = {}) {
+  const r = await run(mysqlClient(), [
+    `--defaults-extra-file=${optionFile}`,
+    "--batch",
+    "--skip-column-names",
+    "--connect-timeout=10",
+    "-e",
+    sql,
+    ...(database ? [database] : []),
+  ]);
+  if (r.missing) return { ok: false, missing: true, error: "The mysql client isn't installed." };
+  if (r.code !== 0) return { ok: false, error: cleanError(r.stderr) };
+  const rows = r.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => l.split("\t"));
+  return { ok: true, rows };
 }
 
 // A strong password that's safe inside SQL quotes and option files.
@@ -93,8 +119,6 @@ export function generatePassword() {
 // SHOW_ROUTINE lets it see stored procedures/functions; without it mysqldump
 // silently leaves them out. It's read-only too.
 export function backupUserSql({ database, username = "agouti_backup", host = "localhost", password }) {
-  const id = (s) => "`" + s.replace(/`/g, "``") + "`";
-  const str = (s) => "'" + s.replace(/\\/g, "\\\\").replace(/'/g, "''") + "'";
   const who = `${str(username)}@${str(host)}`;
   return [
     `CREATE USER ${who} IDENTIFIED BY ${str(password)};`,

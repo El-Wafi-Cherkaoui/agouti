@@ -7,7 +7,7 @@ import { paths } from "./paths.js";
 import { UserError } from "./ui.js";
 
 const stateFile = (p) => join(p.dataDir, "state.json");
-const lockFile = (p) => join(p.dataDir, "backup.lock");
+export const lockFile = (p) => join(p.dataDir, "backup.lock");
 
 export async function loadState(p = paths()) {
   try {

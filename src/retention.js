@@ -7,6 +7,9 @@
 import { run } from "./restic.js";
 
 export const DEFAULT_RETENTION = { daily: 7, weekly: 4, monthly: 12 };
+// Points made just before a restore replaced live data: kept this long, and kept
+// out of the daily/weekly/monthly count, so they never push out a regular backup.
+export const SAFETY_DAYS = 7;
 
 // Which points to keep, like restic's --keep-daily/weekly/monthly: the newest
 // point of each of the last N days (weeks, months) that have one. Only complete
@@ -53,7 +56,7 @@ export function weekKey(d) {
 // Applies the policy to every app in the config. Apps no longer in the config are
 // left alone: deleting someone's last copy of a removed app is not our call.
 // Returns { apps: { name: { kept, deleted } }, pruned }.
-export async function applyRetention(config, { bin, env, policy = config.retention ?? DEFAULT_RETENTION, log = () => {} }) {
+export async function applyRetention(config, { bin, env, policy = config.retention ?? DEFAULT_RETENTION, log = () => {}, now = Date.now() }) {
   const r = await run(bin, ["snapshots", "--json", "--tag", "agouti"], { env });
   if (r.code !== 0) throw new Error(`Couldn't list restore points: ${r.stderr.trim().split("\n").at(-1)}`);
   const snapshots = JSON.parse(r.stdout || "[]") ?? [];
@@ -67,6 +70,7 @@ export async function applyRetention(config, { bin, env, policy = config.retenti
     const points = byApp.get(app) ?? new Map();
     const pt = points.get(point) ?? { id: point, at: new Date(s.time), parts: new Set(), snapshots: [] };
     pt.parts.add(tag("part"));
+    if (s.tags.includes("kind=safety")) pt.safety = true;
     pt.snapshots.push(s.id);
     if (new Date(s.time) < pt.at) pt.at = new Date(s.time);
     points.set(point, pt);
@@ -78,9 +82,11 @@ export async function applyRetention(config, { bin, env, policy = config.retenti
   for (const [app, points] of byApp) {
     const project = config.projects[app];
     const expected = project.files?.length ? 2 : 1;
-    const list = [...points.values()].map((pt) => ({ ...pt, complete: pt.parts.size >= expected }));
+    const all = [...points.values()].map((pt) => ({ ...pt, complete: pt.parts.size >= expected }));
+    const list = all.filter((pt) => !pt.safety);
     const keep = pointsToKeep(list, policy);
-    const drop = list.filter((pt) => !keep.has(pt.id));
+    for (const pt of all) if (pt.safety && now - pt.at < SAFETY_DAYS * 86400000) keep.add(pt.id);
+    const drop = all.filter((pt) => !keep.has(pt.id));
     for (const pt of drop) forget.push(...pt.snapshots);
     result.apps[app] = { kept: keep.size, deleted: drop.length };
   }

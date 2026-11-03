@@ -14,7 +14,9 @@ import { acquireLock, recordBackup } from "./state.js";
 import { UserError } from "./ui.js";
 
 // Backs up the named apps (all when empty). Returns one result per app.
-export async function backupApps(names = [], { p = paths(), onEvent = () => {}, log } = {}) {
+// lock: false when the caller already holds the backup lock (restore's safety backup).
+// tags: extra restic tags, e.g. kind=safety for the point made before a restore.
+export async function backupApps(names = [], { p = paths(), onEvent = () => {}, log, lock = true, tags = [] } = {}) {
   const config = await requireConfig(p);
   const all = Object.keys(config.projects ?? {});
   if (!all.length) throw new UserError("There are no apps to back up yet.", "Add one with `sudo agouti` or `sudo agouti add <dir>`.");
@@ -22,13 +24,13 @@ export async function backupApps(names = [], { p = paths(), onEvent = () => {}, 
   if (unknown.length) throw new UserError(`Unknown app: ${unknown.join(", ")}`, `Apps: ${all.join(", ")}`);
   const selected = names.length ? [...new Set(names)] : all;
 
-  const release = await acquireLock(p);
+  const release = lock ? await acquireLock(p) : async () => {};
   try {
     const bin = await ensureRestic({ p, log });
     const env = await resticEnv(config, p);
     const results = [];
     for (const name of selected) {
-      const result = await backupApp(name, config.projects[name], { bin, env, onEvent });
+      const result = await backupApp(name, config.projects[name], { bin, env, onEvent, extraTags: tags });
       await recordBackup(name, result, p);
       results.push(result);
     }
@@ -45,10 +47,10 @@ export function pointId(date = new Date()) {
     .replace(/\.\d+Z$/, "Z");
 }
 
-async function backupApp(name, project, { bin, env, onEvent }) {
+async function backupApp(name, project, { bin, env, onEvent, extraTags = [] }) {
   const started = new Date();
   const point = pointId(started);
-  const tags = ["agouti", `app=${name}`, `point=${point}`];
+  const tags = ["agouti", `app=${name}`, `point=${point}`, ...extraTags];
   const common = ["backup", "--host", hostname()];
   onEvent({ type: "app-start", app: name, point });
 

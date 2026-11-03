@@ -2,10 +2,10 @@
 // then a home screen with every action. Each action calls the same core code as
 // the matching command, so `agouti <command>` and this app always behave the same.
 import { readFile } from "node:fs/promises";
-import { Separator } from "@inquirer/prompts";
 import { printCreated } from "./commands/init.js";
 import { addFlow } from "./flows/add.js";
 import { runBackup } from "./flows/backup.js";
+import { restoreFlow } from "./flows/restore.js";
 import { printStatus, scheduleFlow } from "./flows/schedule.js";
 import { loadConfig } from "./config.js";
 import { loadHealthcheck } from "./healthcheck.js";
@@ -123,9 +123,8 @@ async function home(config, ask, p) {
         : [addChoice]),
       { value: "check", name: "Check storage", description: "Make sure this server can still reach the repository." },
       { value: "key", name: "Show recovery key", description: "In case you didn't save it during setup." },
+      ...(apps.length ? [{ value: "restore", name: "Restore", description: "A database, files or a single file, as a copy or in place." }] : []),
       { value: "quit", name: "Quit" },
-      new Separator(dim("── Coming soon ──")),
-      { value: "restore", name: "Restore", disabled: true },
     ],
   });
 
@@ -134,6 +133,7 @@ async function home(config, ask, p) {
     if (action === "backup") await backupNow(ask, apps, p);
     if (action === "add") await addFlow(ask, { p });
     if (action === "schedule") await scheduleFlow(ask, { p });
+    if (action === "restore") await restoreFlow(ask, { p });
     if (action === "check") await checkStorage(config, p);
     if (action === "key") await showKey(ask, p);
   } catch (err) {

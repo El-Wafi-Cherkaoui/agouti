@@ -5,6 +5,7 @@ import * as add from "./commands/add.js";
 import * as backup from "./commands/backup.js";
 import * as connect from "./commands/connect.js";
 import * as init from "./commands/init.js";
+import * as restore from "./commands/restore.js";
 import * as schedule from "./commands/schedule.js";
 import { UserError, dim, red } from "./ui.js";
 
@@ -14,6 +15,13 @@ const COMMANDS = {
   init: { run: init.init, usage: init.usage, options: init.options, summary: "Create the encrypted backup repository (once per server)", root: true },
   add: { run: add.add, usage: add.usage, options: add.options, summary: "Add an app to back up (database + uploaded files)", root: true },
   backup: { run: backup.backup, usage: backup.usage, options: backup.options, summary: "Back up apps now (all, or the ones named)", root: true },
+  restore: {
+    run: restore.restore,
+    usage: restore.usage,
+    options: restore.options,
+    summary: "Restore a database and files, as a copy or in place",
+    root: true,
+  },
   schedule: {
     run: schedule.schedule,
     usage: schedule.usage,
@@ -38,7 +46,6 @@ Options:
   -h, --help     Show help for a command
   -v, --version  Show the version
 
-Agouti is in development: restore is coming next.
 https://github.com/El-Wafi-Cherkaoui/agouti`;
 
 export async function main(argv) {

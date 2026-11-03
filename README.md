@@ -133,35 +133,49 @@ When something fails, you also get a message:
 
 ## Restore
 
+`sudo agouti` → **Restore** walks you through it: pick the app, the restore point, what to restore (everything, the database, the files, or one file), and how.
+
+By default a restore is a **copy**, next to the live data, so it's always safe to try: the database goes into a new database, the files into `/var/lib/agouti/restores`. Nothing live is touched. **Replace** overwrites the live data, but only after you type the app's name, and only after Agouti saves the current state as a restore point, so you can undo it.
+
 **One file**: a customer deleted their invoice.
 
 ```sh
-$ agouti restore shop --file storage/app/private/invoices/88.pdf
-? From which restore point?  2026-11-02 03:00 (yesterday)
-✓ Restored 1 file (owner www-data, mode 0640)
+$ sudo agouti restore shop --file storage/app/private/invoices/88.pdf
+✓ Restored to /var/lib/agouti/restores/shop-20261103T030000Z/storage/app/private/invoices/88.pdf
 ```
 
-**The database**: a migration went wrong.
+In the app, you can search by name instead of typing the path.
+
+**The database, to look at it**: what did that table look like yesterday?
 
 ```sh
-$ agouti restore shop --db --at "2026-11-03 03:00"
+$ sudo agouti restore shop --only database --point 20261102T030000Z
+  ✓ database  restored into shop_prod_restored_20261102_0300 · 62 of 62 tables · 41s
 
-This will replace database shop_prod:
-  62 tables · 1,204,331 rows now → 1,198,870 rows in backup
-  Current database will be kept as shop_prod_before_restore
-
-Type "shop_prod" to confirm: shop_prod
-✓ Restored in 41s
+Look at the database: mysql shop_prod_restored_20261102_0300
+Drop it when you're done: DROP DATABASE `shop_prod_restored_20261102_0300`;
 ```
 
-**Everything, on a new server**: the old one is gone.
+**Everything, in place**: a migration went wrong.
 
 ```sh
-$ npm install -g agouti
-$ agouti connect r2:...backups --recovery-key agouti-rk-7F3K-...
-$ agouti restore shop --all --to /var/www/shop
-✓ Database + 17,420 files restored. Run your deploy, then point DNS here.
+$ sudo agouti restore shop --replace
+This replaces the live database and files of shop. Type shop to confirm: shop
+✓ Current state saved: restore point 20261103T142542Z
+  ✓ database  shop_prod replaced · 62 of 62 tables · 44s
+  ✓ files     2 folders replaced · 17,420 files · 3.1 GB · 2m10s
+✓ Restored shop @ 2026-11-03 03:00 (UTC)
+
+To undo: sudo agouti restore shop --point 20261103T142542Z --replace
 ```
+
+Only the folders you back up are replaced. Your app's code and other folders are never touched. Pressing Ctrl-C or losing the SSH connection mid-replace doesn't stop it halfway. Pressing Ctrl-C twice does, and Agouti tells you how to undo.
+
+Restoring a database needs a MySQL user that can create databases (the backup user can only read). Agouti uses root through the local socket, which is the default on Debian and Ubuntu, or asks for one (`--db-admin-user`, password in `AGOUTI_DB_ADMIN_PASSWORD`).
+
+See all restore points with `sudo agouti restore shop --list`.
+
+**On a new server** (coming next): `agouti connect` with your recovery key, then restore your apps from the repository.
 
 Before a risky deploy, make a restore point by hand:
 
@@ -226,7 +240,7 @@ Each restore point is marked `✓ verified`, `⚠ unverified` or `✕ failed`.
 - **Append-only storage** (Object Lock, or an append-only REST server) means an attacker on your server can add backups but not delete them.
 - Database passwords go through a private option file, never the command line, where `ps` could show them.
 - `agouti add` asks before reading your app's `.env`, keeps only the database settings from it, and recommends a MySQL user that can **only read** what a backup needs (it gives you the SQL).
-- Restores never overwrite without showing what changes and asking you to type the database name. The old database is kept until you remove it.
+- Restores are copies unless you choose to replace, and replacing needs the app's name typed. The state before a replace is saved as a restore point first, so it can be undone.
 
 ## Under the hood
 
