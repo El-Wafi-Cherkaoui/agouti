@@ -30,6 +30,14 @@ Runs on Linux servers. Needs access to `mysqldump`, either installed locally or 
 
 ## Get started
 
+```sh
+sudo agouti
+```
+
+That's the only command you need to remember. On a new server it walks you through setup: storage, then your apps, then the schedule. After that it opens a home screen where every action (add an app, back up, restore, view logs) is a keypress away.
+
+Every action is also a plain command, for scripts, timers and quick use over SSH. The steps below show the commands; the interactive app asks the same questions.
+
 ### 1. Connect storage (once per server)
 
 ```sh

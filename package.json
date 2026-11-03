@@ -28,9 +28,17 @@
     "agouti": "bin/agouti.js"
   },
   "files": [
-    "bin"
+    "bin",
+    "src"
   ],
+  "scripts": {
+    "test": "node --test"
+  },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.17"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^8.7.5",
+    "yaml": "^2.9.1"
   }
 }
