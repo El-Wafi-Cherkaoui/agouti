@@ -1,6 +1,6 @@
 {
   "name": "agouti",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Backups for the apps on your server: MySQL/MariaDB databases and uploaded files, encrypted, scheduled and restore-tested. (In development.)",
   "keywords": [
     "backup",
