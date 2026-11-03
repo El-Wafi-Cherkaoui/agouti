@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { printCreated } from "./commands/init.js";
 import { addFlow } from "./flows/add.js";
 import { runBackup } from "./flows/backup.js";
+import { offerBringBack } from "./flows/adopt.js";
 import { restoreFlow } from "./flows/restore.js";
 import { printStatus, scheduleFlow } from "./flows/schedule.js";
 import { loadConfig } from "./config.js";
@@ -85,6 +86,7 @@ async function connectFlow(ask, p) {
   info(dim("\nChecking the repository..."));
   await connectRepository({ repository, credentials, key }, { p, log: info });
   ok(`Connected to ${bold(describeRepository(repository))}`);
+  await offerBringBack(ask, { p });
 }
 
 async function home(config, ask, p) {
@@ -123,7 +125,11 @@ async function home(config, ask, p) {
         : [addChoice]),
       { value: "check", name: "Check storage", description: "Make sure this server can still reach the repository." },
       { value: "key", name: "Show recovery key", description: "In case you didn't save it during setup." },
-      ...(apps.length ? [{ value: "restore", name: "Restore", description: "A database, files or a single file, as a copy or in place." }] : []),
+      {
+        value: "restore",
+        name: "Restore",
+        description: apps.length ? "A database, files or a single file, as a copy or in place." : "Bring back apps from the backups (e.g. on a new server).",
+      },
       { value: "quit", name: "Quit" },
     ],
   });

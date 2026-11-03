@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { requireConfig } from "./config.js";
 import { dumpCommand } from "./mysql.js";
 import { paths } from "./paths.js";
-import { EXIT, ensureRestic, resticEnv, runJson } from "./restic.js";
+import { EXIT, ensureRestic, resticEnv, run, runJson } from "./restic.js";
 import { acquireLock, recordBackup } from "./state.js";
 import { UserError } from "./ui.js";
 
@@ -38,6 +38,19 @@ export async function backupApps(names = [], { p = paths(), onEvent = () => {}, 
   } finally {
     await release();
   }
+}
+
+export const APP_FILE = "agouti-app.json";
+
+export function appDescription(name, project) {
+  const db = project.database;
+  return {
+    app: name,
+    path: project.path,
+    ...(project.framework ? { framework: project.framework } : {}),
+    database: { engine: db.engine ?? "mysql", name: db.name, ...(db.socket ? { socket: db.socket } : { host: db.host, port: db.port }), user: db.user },
+    files: project.files ?? [],
+  };
 }
 
 export function pointId(date = new Date()) {
@@ -100,6 +113,17 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [] }) {
     };
   });
 
+  // What a new server needs to restore this app after this one is lost: where it
+  // lived and what to back up. Never credentials.
+  let described = { ok: true };
+  if (database.ok || files.ok) {
+    const r = await run(bin, [...common, "--tag", [...tags, "part=app"].join(","), "--stdin", "--stdin-filename", APP_FILE], {
+      env,
+      stdin: JSON.stringify(appDescription(name, project), null, 2) + "\n",
+    });
+    if (r.code !== 0) described = { ok: false, error: describeFailure({ ...r, messages: [] }, "restic") };
+  }
+
   const result = {
     app: name,
     point,
@@ -108,6 +132,7 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [] }) {
     ok: database.ok && files.ok,
     database,
     files,
+    ...(described.ok ? {} : { warning: `The app's description wasn't saved (${described.error}); a new server couldn't find this app.` }),
   };
   onEvent({ type: "app-done", app: name, result });
   return result;

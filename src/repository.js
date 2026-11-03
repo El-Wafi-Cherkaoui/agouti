@@ -68,7 +68,9 @@ export async function repositoryStatus(config, { p = paths(), log } = {}) {
   const env = await resticEnv(config, p);
   const { code, stdout, stderr } = await run(bin, ["snapshots", "--json", "--no-lock"], { env });
   if (code !== 0) return { reachable: false, message: lastLine(stderr) };
-  return { reachable: true, snapshots: JSON.parse(stdout || "[]").length };
+  // One restore point is several snapshots (database, files, ...) sharing a point tag.
+  const points = new Set((JSON.parse(stdout || "[]") ?? []).map((s) => s.tags?.find((t) => t.startsWith("point=")) ?? s.id));
+  return { reachable: true, snapshots: points.size };
 }
 
 // For S3 repositories given as a string: keys come from the usual AWS variables.

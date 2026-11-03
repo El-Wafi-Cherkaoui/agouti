@@ -3,17 +3,17 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { backupApps } from "../src/backup.js";
-import { saveConfig, saveRecoveryKey } from "../src/config.js";
+import { loadConfig, saveConfig, saveRecoveryKey } from "../src/config.js";
 import { paths } from "../src/paths.js";
 import { restoreFlow } from "../src/flows/restore.js";
 import { applyRetention } from "../src/retention.js";
-import { copyDatabaseName, listPoints, restoreApp, restoreFilesByPath } from "../src/restore.js";
+import { copyDatabaseName, discoverApps, listPoints, restoreApp, restoreFilesByPath } from "../src/restore.js";
 import { ensureRestic, resticEnv } from "../src/restic.js";
 import { captured, laravelFixture, scripted } from "./helpers.js";
 
@@ -62,7 +62,7 @@ else if (/SELECT 1 FROM information_schema.SCHEMATA/.test(sql)) { if (fs.existsS
 else if (/information_schema.TABLES/.test(sql)) { const f = path.join(db(name(/TABLE_SCHEMA = '([^']+)'/)), "data.sql"); console.log(fs.existsSync(f) ? (fs.readFileSync(f, "utf8").match(/^CREATE TABLE \`/gm) || []).length : 0); }
 else {
   const drop = name(/DROP DATABASE IF EXISTS \`([^\`]+)\`/); if (drop) fs.rmSync(db(drop), { recursive: true, force: true });
-  const create = name(/CREATE DATABASE \`([^\`]+)\`/); if (create) fs.mkdirSync(db(create));
+  const create = name(/CREATE DATABASE (?:IF NOT EXISTS )?\`([^\`]+)\`/); if (create) fs.mkdirSync(db(create), { recursive: true });
 }
 `,
   );
@@ -255,4 +255,100 @@ test("interactive: a copy by default; replacing needs the app's name typed", asy
   assert.match(out2, /Files added since are deleted/);
   assert.match(out2, /Nothing was changed/);
   assert.ok(existsSync(join(dir, "storage/app/public/stray.txt")));
+});
+
+// A second server using the same repository: nothing set up yet.
+async function newServer(from) {
+  const root = await mkdtemp(join(tmpdir(), "agouti-newserver-"));
+  const p = paths({ AGOUTI_CONFIG_DIR: join(root, "etc"), AGOUTI_DATA_DIR: join(root, "var") });
+  await saveRecoveryKey("agouti-rk-TEST", p);
+  await saveConfig({ repository: from.config.repository, projects: {} }, p);
+  return { root, p };
+}
+
+test("discovery: a new server finds the apps in the backups, with no credentials", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const old = await setup();
+  const { p } = await newServer(old);
+  const env = await resticEnv(old.config, p);
+  const [found, ...rest] = await discoverApps({ bin: restic, env });
+  assert.equal(rest.length, 0);
+  assert.equal(found.name, "shop");
+  assert.equal(found.points, 1);
+  assert.deepEqual(found.description, {
+    app: "shop",
+    path: old.dir,
+    framework: "laravel",
+    database: { engine: "mysql", name: "shop_prod", host: "127.0.0.1", port: 3306, user: "agouti_backup" },
+    files: ["storage/app/public", "storage/app/private"],
+  });
+
+  // Backups made before descriptions existed: worked out from the snapshots.
+  const described = JSON.parse(spawnSync(restic, ["snapshots", "--json", "--tag", "part=app"], { env, encoding: "utf8" }).stdout);
+  spawnSync(restic, ["forget", described[0].id], { env });
+  const [guessed] = await discoverApps({ bin: restic, env });
+  assert.equal(guessed.description.guessed, true);
+  assert.equal(guessed.description.path, old.dir);
+  assert.equal(guessed.description.database.name, "shop_prod");
+  assert.deepEqual(guessed.description.files, ["storage/app/private", "storage/app/public"]);
+});
+
+test("new server: the app is restored into empty places and set up to be backed up again", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const old = await setup();
+  const { root, p } = await newServer(old);
+  // The code is deployed already: a fresh clone has .gitignore files in storage/app.
+  const dir = join(root, "srv/shop");
+  await mkdir(join(dir, "storage/app/public"), { recursive: true });
+  await writeFile(join(dir, "storage/app/public/.gitignore"), "*\n");
+  await writeFile(join(dir, "artisan"), "");
+
+  const ask = scripted([
+    ["input", /Where should shop go/, (o) => (assert.equal(o.default, old.dir), dir)],
+    ["input", /Database name/, "shop_new"],
+    ["confirm", /Go ahead/, true],
+    ["confirm", /Keep backing up shop/, true],
+    ["confirm", /daily automatic backups/, false],
+  ]);
+  const out = await captured(() => restoreFlow(ask, { p })); // the only app: picked without asking
+  assert.deepEqual(ask.remaining, []);
+  assert.match(out, /✓ database  restored into shop_new · 2 of 2 tables/);
+  assert.match(out, /shop is set up on this server \(backup user agouti_shop, read-only\)/);
+  assert.doesNotMatch(out, /Deploy shop's code/, "the code is there already");
+
+  assert.equal(await readFile(join(dbDir, "shop_new", "data.sql"), "utf8"), DUMP);
+  assert.equal((await readFile(join(dir, "storage/app/private/invoices/88.pdf"))).length, 500);
+  const config = await loadConfig(p);
+  assert.equal(config.projects.shop.path, dir);
+  assert.equal(config.projects.shop.database.name, "shop_new");
+  assert.equal(config.projects.shop.database.user, "agouti_shop");
+  assert.equal(config.projects.shop.database.source, "restored");
+  assert.equal((await stat(config.projects.shop.database.credentials)).mode & 0o777, 0o600);
+});
+
+test("new server: never overwrites what's already there", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const old = await setup();
+  const { root, p } = await newServer(old);
+  const dir = join(root, "srv/shop");
+  const project = { path: dir, database: { engine: "mysql", name: "shop_prod", host: "localhost", port: 3306 }, files: old.config.projects.shop.files };
+  const opts = { app: "shop", mode: "new", project, origin: old.dir };
+
+  await assert.rejects(restoreApp(opts, { p }), /The database shop_prod already exists on this server and has tables/);
+  project.database.name = "shop_other";
+  await mkdir(join(dir, "storage/app/private"), { recursive: true });
+  await writeFile(join(dir, "storage/app/private/someone-elses.pdf"), "x");
+  await assert.rejects(restoreApp(opts, { p }), /storage\/app\/private already has files/);
+  assert.equal(existsSync(join(dbDir, "shop_other")), false, "checked before any work");
+});
+
+test("agouti connect lists the apps found in the backups", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const old = await setup();
+  const root = await mkdtemp(join(tmpdir(), "agouti-connect-"));
+  const env = { ...process.env, AGOUTI_CONFIG_DIR: join(root, "etc"), AGOUTI_DATA_DIR: join(root, "var"), NO_COLOR: "1" };
+  const r = spawnSync(process.execPath, [BIN, "connect", old.config.repository, "--recovery-key", "agouti-rk-TEST"], { env, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /Found 1 app in the backups:\n  shop .* database shop_prod · last backup just now/);
+  assert.match(r.stdout, /sudo agouti → Restore/);
 });

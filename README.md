@@ -175,7 +175,31 @@ Restoring a database needs a MySQL user that can create databases (the backup us
 
 See all restore points with `sudo agouti restore shop --list`.
 
-**On a new server** (coming next): `agouti connect` with your recovery key, then restore your apps from the repository.
+**Everything, on a new server**: the old one is gone.
+
+Every backup also stores a short description of each app (its folder, database and backed-up folders, never passwords), so a new server can find your apps with just the recovery key:
+
+```sh
+$ npm install -g agouti
+$ sudo agouti
+? Is this a new setup? No, connect to an existing repository
+...
+✓ Connected to Cloudflare R2 (backups)
+
+Found 1 app in the backups:
+  shop    /var/www/shop · database shop_prod · last backup yesterday 03:00 on old-vps
+
+? Restore it on this server now? Yes
+? Where should shop go on this server? /var/www/shop
+? Database name on this server shop_prod
+  ✓ database  restored into shop_prod · 62 of 62 tables · 41s
+  ✓ files     17,420 files · 3.1 GB → /var/www/shop/storage/app/public, /var/www/shop/storage/app/private
+? Keep backing up shop on this server? Yes
+✓ shop is set up on this server (backup user agouti_shop, read-only).
+? Turn on daily automatic backups? Yes
+```
+
+Deploy the code first if you can (`git clone` refuses a folder that isn't empty). Agouti only restores into an empty database and empty folders, so nothing on the new server is overwritten. It creates a read-only MySQL user for the app, so backups go on as before.
 
 Before a risky deploy, make a restore point by hand:
 

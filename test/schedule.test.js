@@ -194,7 +194,7 @@ test("a scheduled run backs up, deletes old points and pings the healthcheck", a
 
   const env = await resticEnv(config, p);
   const snaps = JSON.parse((await run(restic, ["snapshots", "--json"], { env })).stdout);
-  assert.equal(snaps.length, 2, "one point left: its database and files snapshots");
+  assert.equal(snaps.length, 3, "one point left: its database, files and app description snapshots");
   assert.equal(new Set(snaps.map((s) => s.tags.find((x) => x.startsWith("point=")))).size, 1);
 
   assert.deepEqual(

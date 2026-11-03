@@ -81,8 +81,8 @@ export async function applyRetention(config, { bin, env, policy = config.retenti
   const forget = [];
   for (const [app, points] of byApp) {
     const project = config.projects[app];
-    const expected = project.files?.length ? 2 : 1;
-    const all = [...points.values()].map((pt) => ({ ...pt, complete: pt.parts.size >= expected }));
+    const complete = (pt) => pt.parts.has("database") && (!project.files?.length || pt.parts.has("files"));
+    const all = [...points.values()].map((pt) => ({ ...pt, complete: complete(pt) }));
     const list = all.filter((pt) => !pt.safety);
     const keep = pointsToKeep(list, policy);
     for (const pt of all) if (pt.safety && now - pt.at < SAFETY_DAYS * 86400000) keep.add(pt.id);

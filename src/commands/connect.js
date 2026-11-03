@@ -2,7 +2,8 @@ import { normalizeRecoveryKey } from "../recovery-key.js";
 import { askRecoveryKey, askS3Keys, requireTty } from "../prompts.js";
 import { assertNotConfigured, connectRepository, s3CredentialsFromEnv } from "../repository.js";
 import { describeRepository, repositoryNeedsS3Keys } from "../storage.js";
-import { UserError, bold, info, ok } from "../ui.js";
+import { appsToBringBack, describeFound } from "../flows/adopt.js";
+import { UserError, bold, dim, info, ok } from "../ui.js";
 
 export const usage = `Usage: agouti connect <restic-repository> [--recovery-key <key>]
 
@@ -39,4 +40,10 @@ export async function connect({ values, positionals }) {
 
   await connectRepository({ repository, credentials, key: normalizeRecoveryKey(key) }, { log: info });
   ok(`Connected to ${bold(describeRepository(repository))}`);
+
+  const found = await appsToBringBack();
+  if (!found.length) return;
+  info(`\nFound ${found.length} ${found.length === 1 ? "app" : "apps"} in the backups:`);
+  for (const a of found) info(`  ${bold(a.name.padEnd(12))} ${dim(describeFound(a))}`);
+  info(`\nTo restore ${found.length === 1 ? "it" : "them"} on this server: ${bold("sudo agouti")} → Restore`);
 }

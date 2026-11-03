@@ -74,8 +74,16 @@ test("a backup makes one restore point: database + files snapshots with the same
   );
 
   const snaps = JSON.parse((await r("snapshots", "--json", "--tag", `point=${result.point}`)).stdout);
-  assert.deepEqual(snaps.map((s) => s.tags.find((x) => x.startsWith("part="))).sort(), ["part=database", "part=files"]);
+  assert.deepEqual(snaps.map((s) => s.tags.find((x) => x.startsWith("part="))).sort(), ["part=app", "part=database", "part=files"]);
   for (const s of snaps) assert.ok(s.tags.includes("app=shop") && s.tags.includes("agouti"));
+
+  // What a new server needs to find and restore the app, without any credentials.
+  const described = snaps.find((s) => s.tags.includes("part=app"));
+  const app = JSON.parse((await r("dump", described.id, "/agouti-app.json")).stdout);
+  assert.equal(app.app, "shop");
+  assert.equal(app.database.name, "shop_prod");
+  assert.deepEqual(app.files, ["storage/app/public", "storage/app/private"]);
+  assert.doesNotMatch(JSON.stringify(app), /credentials|password|\.cnf/);
 
   // The dump is stored as-is and can be read back.
   assert.equal((await r("dump", result.database.snapshot, "/shop_prod.sql")).stdout, DUMP);
@@ -105,7 +113,7 @@ test("a failing dump saves no database snapshot, still saves files, and explains
   const snaps = JSON.parse((await r("snapshots", "--json", "--tag", `point=${bad.point}`)).stdout);
   assert.deepEqual(
     snaps.map((s) => s.tags.find((x) => x.startsWith("part="))),
-    ["part=files"],
+    ["part=files", "part=app"],
     "no partial dump may be stored",
   );
 

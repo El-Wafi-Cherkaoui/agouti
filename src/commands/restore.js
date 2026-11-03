@@ -53,7 +53,12 @@ export async function restore({ positionals, values }, { ask = defaultAsk, p = p
   }
   if (!app) throw new UserError("Which app? e.g. `agouti restore shop --list`.");
   const config = await requireConfig(p);
-  if (!config.projects?.[app]) throw new UserError(`Unknown app: ${app}`, `Apps: ${Object.keys(config.projects ?? {}).join(", ") || "none yet"}`);
+  if (!config.projects?.[app]) {
+    throw new UserError(
+      `${app} isn't set up on this server.`,
+      `Apps here: ${Object.keys(config.projects ?? {}).join(", ") || "none"}. If it's in the backups (e.g. a new server), run \`sudo agouti restore ${app}\` in a terminal: it brings the app back and sets it up.`,
+    );
+  }
 
   if (values.list) {
     const bin = await ensureRestic({ p, log: info });

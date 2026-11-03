@@ -5,21 +5,32 @@ import { ago } from "../app.js";
 import { requireConfig } from "../config.js";
 import { formatBytes } from "../detect.js";
 import { paths } from "../paths.js";
-import { adminConnection, copyDatabaseName, findFiles, listPoints, restoreApp, restoreFilesByPath } from "../restore.js";
+import { adminConnection, copyDatabaseName, discoverApps, findFiles, listPoints, restoreApp, restoreFilesByPath } from "../restore.js";
+import { bringBack, describeFound } from "./adopt.js";
 import { ensureRestic, resticEnv } from "../restic.js";
 import { UserError, bold, dim, green, info, red, warn, yellow } from "../ui.js";
 
 export async function restoreFlow(ask, { p = paths(), app } = {}) {
   const config = await requireConfig(p);
   const apps = Object.keys(config.projects ?? {});
-  if (!apps.length) throw new UserError("There are no apps yet, so nothing to restore.");
-  if (!app) app = apps.length === 1 ? apps[0] : await ask.select({ message: "Restore which app?", choices: apps.map((a) => ({ value: a, name: a })) });
-  const project = config.projects[app];
-  if (!project) throw new UserError(`Unknown app: ${app}`, `Apps: ${apps.join(", ")}`);
-
   const bin = await ensureRestic({ p, log: info });
   const env = await resticEnv(config, p);
   info(dim("Looking up restore points..."));
+  // Apps in the backups but not on this server (e.g. a new server after `connect`).
+  const elsewhere = (await discoverApps({ bin, env })).filter((a) => !config.projects?.[a.name]);
+  if (!apps.length && !elsewhere.length) throw new UserError("There's nothing to restore yet: no app has been backed up.");
+  if (!app) {
+    const choices = [
+      ...apps.map((a) => ({ value: a, name: a })),
+      ...elsewhere.map((a) => ({ value: a.name, name: `${a.name}  ${dim("(in the backups, not on this server yet)")}`, description: describeFound(a) })),
+    ];
+    app = choices.length === 1 ? choices[0].value : await ask.select({ message: "Restore which app?", choices });
+  }
+  const other = elsewhere.find((a) => a.name === app);
+  if (other) return bringBack(ask, other, { p });
+  const project = config.projects[app];
+  if (!project) throw new UserError(`Unknown app: ${app}`, `Apps: ${[...apps, ...elsewhere.map((a) => a.name)].join(", ") || "none"}`);
+
   const points = await listPoints(app, { bin, env });
   if (!points.length) throw new UserError(`${app} has no restore points yet.`, `Make one first: "Back up now", or sudo agouti backup ${app}`);
 
@@ -98,7 +109,7 @@ Put the app in maintenance mode first if it's live (Laravel: php artisan down).
 
 // Finds a MySQL user that can create databases: root through the local socket,
 // or one the user gives. Returns { user, password } for restoreApp.
-async function askAdmin(ask, project, p) {
+export async function askAdmin(ask, project, p) {
   try {
     const conn = await adminConnection(project, { p });
     await conn.cleanup();
@@ -107,21 +118,26 @@ async function askAdmin(ask, project, p) {
     if (!(err instanceof UserError) || /isn't installed/.test(err.message)) throw err;
   }
   info(`
-Restoring the database needs a MySQL user that can create and drop databases
-(the backup user only reads). Root on this server didn't work, so give one.
+Restoring a database needs a MySQL user that can create databases. Logging in
+as root through the local socket didn't work, so give one (and its server).
 The password is only used for this restore and isn't saved.
 `);
+  const db = project.database;
   for (;;) {
+    const server = (
+      await ask.input({ message: "MySQL server (host or host:port)", default: db.port && db.port !== 3306 ? `${db.host}:${db.port}` : db.host })
+    ).trim();
+    const [host, port = "3306"] = server.split(":");
     const user = await ask.input({ message: "MySQL admin user", default: "root" });
     const password = await ask.password({ message: `Password of ${user}`, mask: "*" });
     try {
-      const conn = await adminConnection(project, { user, password, p });
+      const conn = await adminConnection(project, { user, password, host, port: Number(port), p });
       await conn.cleanup();
-      return { user, password };
+      return { user, password, host, port: Number(port) };
     } catch (err) {
       if (!(err instanceof UserError)) throw err;
       info(`${red("✕")} ${err.message}`);
-      if (!(await ask.confirm({ message: "Try another user?", default: true }))) throw new UserError("Restore cancelled: no MySQL user to restore with.");
+      if (!(await ask.confirm({ message: "Try again?", default: true }))) throw new UserError("Restore cancelled: no MySQL user to restore with.");
     }
   }
 }
@@ -214,11 +230,12 @@ function partLine(part, r, mode) {
   const secs = dim(`${r.seconds}s`);
   if (!r.ok) return `${red("✕")} ${label} ${r.error}`;
   if (part === "database") {
-    const where = mode === "replace" ? `${bold(r.database)} replaced` : `restored into ${bold(r.database)}`;
+    const where = mode === "replace" ? `${bold(r.database)} replaced` : `restored into ${bold(r.database)}`; // new: into the (empty) database
     return `${green("✓")} ${label} ${where} · ${r.tables} of ${r.expectedTables} tables · ${secs}`;
   }
   const count = `${(r.files ?? 0).toLocaleString("en-US")} ${r.files === 1 ? "file" : "files"} · ${formatBytes(r.bytes ?? 0)}`;
   if (mode === "replace") return `${green("✓")} ${label} ${r.folders} ${r.folders === 1 ? "folder" : "folders"} replaced · ${count} · ${secs}`;
+  if (mode === "new") return `${green("✓")} ${label} ${count} → ${r.paths.map((x) => bold(x)).join(", ")} · ${secs}`;
   return `${green("✓")} ${label} ${count} → ${bold(r.path)} · ${secs}`;
 }
 
@@ -230,7 +247,7 @@ function nextSteps(r) {
       lines.push(`Drop it when you're done: DROP DATABASE \`${r.database.database}\`;`);
     }
     if (r.files?.ok) lines.push(`Copy back what you need from ${r.files.path} (cp -a keeps owners), then delete it.`);
-  } else {
+  } else if (r.mode === "replace") {
     if (r.safety?.ok) lines.push(`To undo: sudo agouti restore ${r.app} --point ${r.safety.point} --replace`);
     if (r.ok) lines.push("Clear the app's caches if it has any (Laravel: php artisan cache:clear), then bring it back up.");
   }

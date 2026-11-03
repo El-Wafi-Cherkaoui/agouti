@@ -9,7 +9,7 @@ import { shield, spawn, stopAll } from "./children.js";
 import { existsSync, rmSync } from "node:fs";
 import { mkdir, readdir, rm, statfs } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { backupApps } from "./backup.js";
+import { APP_FILE, backupApps } from "./backup.js";
 import { requireConfig, writeAtomic } from "./config.js";
 import { cleanError, id, mysqlClient, optionFileContent, query, str } from "./mysql.js";
 import { paths } from "./paths.js";
@@ -35,6 +35,62 @@ export async function listPoints(app, { bin, env }) {
     points.set(point, pt);
   }
   return [...points.values()].sort((a, b) => b.id.localeCompare(a.id));
+}
+
+// Apps that have backups in the repository, from their latest description (see
+// appDescription in backup.js). Used on a new server, after `agouti connect`.
+// [{ name, host, at, points, description }], newest first.
+export async function discoverApps({ bin, env }) {
+  const r = await run(bin, ["snapshots", "--json", "--tag", "agouti"], { env });
+  if (r.code !== 0) throw new UserError(`Couldn't read the backups: ${cleanRestic(r.stderr)}`);
+  const apps = new Map();
+  for (const s of JSON.parse(r.stdout || "[]") ?? []) {
+    const tag = (name) => s.tags?.find((t) => t.startsWith(`${name}=`))?.slice(name.length + 1);
+    const name = tag("app");
+    if (!name || s.tags.includes("kind=safety")) continue;
+    const app = apps.get(name) ?? { name, host: s.hostname, at: s.time, points: new Set(), describedBy: null, snapshots: [] };
+    app.points.add(tag("point"));
+    if (s.time >= app.at) Object.assign(app, { at: s.time, host: s.hostname });
+    if (tag("part") === "app" && (!app.describedBy || s.time > app.describedBy.time)) app.describedBy = s;
+    app.snapshots.push(s);
+    apps.set(name, app);
+  }
+  const found = [];
+  for (const app of apps.values()) {
+    let description = null;
+    if (app.describedBy) {
+      const d = await run(bin, ["dump", app.describedBy.id, `/${APP_FILE}`], { env });
+      if (d.code === 0) description = JSON.parse(d.stdout);
+    }
+    // Backups made before descriptions existed: work it out from the snapshots.
+    description ??= guessDescription(app);
+    found.push({ name: app.name, host: app.host, at: app.at, points: app.points.size, description });
+  }
+  return found.sort((a, b) => b.at.localeCompare(a.at));
+}
+
+function guessDescription(app) {
+  const latest = (part) => app.snapshots.filter((s) => s.tags.includes(`part=${part}`)).sort((a, b) => b.time.localeCompare(a.time))[0];
+  const db = latest("database");
+  const folders = latest("files")?.paths ?? [];
+  // The app's folder: above storage/ (Laravel), else the folders' common parent.
+  const common = folders.length ? folders.reduce((a, b) => commonDir(a, b)) : "";
+  const path = common.includes("/storage") ? common.slice(0, common.indexOf("/storage")) : common;
+  return {
+    app: app.name,
+    path,
+    database: { engine: "mysql", name: db ? db.paths[0].replace(/^\//, "").replace(/\.sql$/, "") : app.name },
+    files: folders.map((f) => relative(path, f)),
+    guessed: true,
+  };
+}
+
+function commonDir(a, b) {
+  const x = a.split("/");
+  const y = b.split("/");
+  let i = 0;
+  while (i < x.length && x[i] === y[i]) i++;
+  return x.slice(0, i).join("/") || "/";
 }
 
 const cleanRestic = (stderr) =>
@@ -65,7 +121,7 @@ export function copyFolder(p, app, pointId) {
 // read-only backup user can't. By default: root through the local socket (how
 // MySQL and MariaDB are set up on Debian and Ubuntu: root on the server is root
 // in MySQL). Or a given admin user. Writes a temporary root-only option file.
-export async function adminConnection(project, { user, password, p = paths() } = {}) {
+export async function adminConnection(project, { user, password, host, port, p = paths() } = {}) {
   const db = project.database;
   const local = db.socket || ["localhost", "127.0.0.1", "::1"].includes(db.host);
   if (!user && !local) {
@@ -79,7 +135,7 @@ export async function adminConnection(project, { user, password, p = paths() } =
   for (const f of await readdir(p.dataDir).catch(() => [])) if (/^restore-admin-\d+\.cnf$/.test(f)) await rm(join(p.dataDir, f), { force: true });
   const file = join(p.dataDir, `restore-admin-${process.pid}.cnf`);
   const conn = user
-    ? { username: user, password, socket: db.socket, host: db.host, port: db.port ?? 3306 }
+    ? { username: user, password, socket: host ? undefined : db.socket, host: host ?? db.host, port: port ?? db.port ?? 3306 }
     : { username: "root", password: "", socket: db.socket, host: "localhost", port: db.port ?? 3306 };
   await mkdir(p.dataDir, { recursive: true });
   await writeAtomic(file, optionFileContent(conn), 0o600);
@@ -105,12 +161,16 @@ export async function adminConnection(project, { user, password, p = paths() } =
 }
 
 // Restores the given parts of one point.
-// opts: { app, point (id or "latest"), parts: ["database", "files"], mode: "copy" | "replace", admin: { user, password } }
+// opts: { app, point (id or "latest"), parts: ["database", "files"], mode, admin: { user, password } }
+// mode: "copy" | "replace" (an app of this server), or "new": an app found in the
+// backups but not set up here (a new server). opts.project then says where it goes,
+// opts.origin where it was. "new" only writes into an empty database and empty folders.
 export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } = {}) {
   const { app, parts = ["database", "files"], mode = "copy" } = opts;
   const config = await requireConfig(p);
-  const project = config.projects?.[app];
+  const project = mode === "new" ? opts.project : config.projects?.[app];
   if (!project) throw new UserError(`Unknown app: ${app}`, `Apps: ${Object.keys(config.projects ?? {}).join(", ") || "none yet"}`);
+  const origin = opts.origin ?? project.path;
 
   const release = await acquireLock(p);
   let admin;
@@ -149,6 +209,21 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
       }
     }
 
+    // New server: never overwrite anything that's already there.
+    if (mode === "new") {
+      if (parts.includes("database")) {
+        const name = project.database.name;
+        const [[tables] = []] = (await query(admin.file, `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ${str(name)}`)).rows ?? [];
+        if (Number(tables) > 0) throw new UserError(`The database ${name} already exists on this server and has tables.`, "Choose another database name.");
+      }
+      if (parts.includes("files")) {
+        for (const folder of point.files.paths) {
+          const dest = destination(folder, origin, project.path);
+          if (await hasFiles(dest)) throw new UserError(`${dest} already has files.`, "Restore into an empty folder, or choose another directory.");
+        }
+      }
+    }
+
     const result = { app, point: point.id, at: point.at, mode, ok: true };
     if (mode === "replace") {
       onEvent({ type: "safety-start", app });
@@ -165,7 +240,7 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
       }
     }
 
-    state.touchingLive = mode === "replace";
+    state.touchingLive = mode !== "copy";
     for (const part of parts) {
       // Replacing: after a failed part, stop. Undo with the safety point rather than pile on changes.
       if (mode === "replace" && !result.ok) break;
@@ -176,7 +251,7 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
         r =
           part === "database"
             ? await restoreDatabase(point, project, { bin, env, admin, mode, onEvent })
-            : await restoreFiles(point, project, { bin, env, mode, target: copyFolder(p, app, point.id), onEvent });
+            : await restoreFiles(point, project, { bin, env, mode, origin, target: copyFolder(p, app, point.id), onEvent });
       } catch (err) {
         r = { ok: false, error: err.message, hint: err.hint };
       }
@@ -227,7 +302,7 @@ function guardInterrupts(state, { app, onEvent, cleanup }) {
 
 async function restoreDatabase(point, project, { bin, env, admin, mode, onEvent }) {
   const live = project.database.name;
-  const target = mode === "replace" ? live : copyDatabaseName(live, point.id);
+  const target = mode === "copy" ? copyDatabaseName(live, point.id) : live;
   const q = async (sql, opts) => {
     const r = await query(admin.file, sql, opts);
     if (!r.ok) throw new UserError(r.error);
@@ -244,7 +319,14 @@ async function restoreDatabase(point, project, { bin, env, admin, mode, onEvent 
   const create = `CREATE DATABASE ${id(target)} CHARACTER SET ${charset}${collation ? ` COLLATE ${collation}` : ""}`;
   // Replace: drop and recreate, so tables created after the backup don't linger.
   // Privileges granted on the database survive DROP DATABASE in MySQL and MariaDB.
-  await q(mode === "replace" ? `DROP DATABASE IF EXISTS ${id(target)}; ${create}` : create);
+  // New: the database may exist already, empty (checked before); keep it, with its grants.
+  await q(
+    mode === "replace"
+      ? `DROP DATABASE IF EXISTS ${id(target)}; ${create}`
+      : mode === "new"
+        ? create.replace("CREATE DATABASE", "CREATE DATABASE IF NOT EXISTS")
+        : create,
+  );
 
   let loaded;
   try {
@@ -308,7 +390,7 @@ function pipeDump(part, database, { bin, env, admin, onEvent }) {
   });
 }
 
-async function restoreFiles(point, project, { bin, env, mode, target, onEvent }) {
+async function restoreFiles(point, project, { bin, env, mode, origin, target, onEvent }) {
   const folders = point.files.paths;
   if (mode === "copy") {
     const free = await statfs(await existingParent(target)).catch(() => null);
@@ -320,8 +402,8 @@ async function restoreFiles(point, project, { bin, env, mode, target, onEvent })
     // Copy: keep the layout relative to the app (restores/shop-<point>/storage/app/public).
     // Replace: each backed-up folder in place. --delete is scoped to that folder,
     // never to the whole app (which would delete the code).
-    const rel = relative(project.path, folder);
-    const dest = mode === "replace" ? folder : join(target, rel.startsWith("..") ? folder.replace(/^\/+/, "") : rel);
+    const rel = relative(origin, folder);
+    const dest = mode === "copy" ? join(target, rel.startsWith("..") ? folder.replace(/^\/+/, "") : rel) : destination(folder, origin, project.path);
     await mkdir(dest, { recursive: true });
     const args = ["restore", `${point.files.snapshot}:${folder}`, "--target", dest, ...(mode === "replace" ? ["--delete"] : [])];
     const r = await runJson(bin, args, {
@@ -339,8 +421,24 @@ async function restoreFiles(point, project, { bin, env, mode, target, onEvent })
     folders: folders.length,
     files: point.files.files,
     bytes: point.files.bytes,
-    ...(mode === "copy" ? { path: target } : { paths: folders }),
+    ...(mode === "copy" ? { path: target } : { paths: folders.map((f) => destination(f, origin, project.path)) }),
   };
+}
+
+// Where a backed-up folder goes when the app now lives in `path` (it lived in `origin`).
+function destination(folder, origin, path) {
+  const rel = relative(origin, folder);
+  return rel.startsWith("..") ? folder : join(path, rel);
+}
+
+// True if dir holds any file other than .gitignore (which a fresh `git clone` of a
+// Laravel app puts in storage/app/*).
+async function hasFiles(dir) {
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+  for (const e of entries) {
+    if (e.isDirectory() ? await hasFiles(join(dir, e.name)) : e.name !== ".gitignore") return true;
+  }
+  return false;
 }
 
 async function existingParent(dir) {

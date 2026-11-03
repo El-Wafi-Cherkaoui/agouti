@@ -178,3 +178,22 @@ export async function dumpCommand(optionFile, database, { bin = process.env.AGOU
     database,
   ];
 }
+
+// Creates (or resets) a read-only backup user for one app, through an admin
+// connection: the same privileges as backupUserSql(). One user per app, so
+// setting up a second app never changes the first one's password.
+// host: "localhost" for a local server (socket), "%" for one reached over the network.
+export async function createBackupUser(adminFile, { app, database, host = "localhost" }) {
+  const username = `agouti_${app.replace(/-/g, "_")}`.slice(0, 32);
+  const password = generatePassword();
+  const who = `${str(username)}@${str(host)}`;
+  const r = await query(
+    adminFile,
+    `CREATE USER IF NOT EXISTS ${who} IDENTIFIED BY ${str(password)}; ALTER USER ${who} IDENTIFIED BY ${str(password)}; ` +
+      `GRANT SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT ON ${id(database)}.* TO ${who}`,
+  );
+  if (!r.ok) throw new UserError(`Couldn't create the backup user ${username}: ${r.error}`);
+  // Stored procedures: SHOW_ROUTINE on MySQL 8.0.20+, SELECT on mysql.proc on MariaDB.
+  const routines = (await query(adminFile, `GRANT SHOW_ROUTINE ON *.* TO ${who}`)).ok || (await query(adminFile, `GRANT SELECT ON mysql.proc TO ${who}`)).ok;
+  return { username, password, routines };
+}

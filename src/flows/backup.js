@@ -95,6 +95,7 @@ function reporter(live) {
       const when = r.at.replace("T", " ").slice(0, 16);
       if (r.ok) info(`${green("✓")} Restore point ${bold(`${r.app} @ ${when}`)} ${dim("(UTC)")}`);
       else info(`${red("✕")} ${bold(r.app)}: backup incomplete. ${savedParts(r)}`);
+      if (r.warning) info(`  ${yellow("⚠")} ${r.warning}`);
     }
   };
 }

@@ -50,7 +50,7 @@ test("fresh server: guided setup, insists on saving the key, then the home scree
         const value = (v) => opts.choices.find((c) => c.value === v);
         assert.equal(value("backup"), undefined, "nothing to back up before an app is added");
         assert.ok(!value("add").disabled);
-        assert.equal(value("restore"), undefined, "nothing to restore without apps");
+        assert.ok(value("restore"), "restore is offered: the backups may hold apps (new server)");
         return "check";
       },
     ],
