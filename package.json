@@ -1,0 +1,36 @@
+{
+  "name": "agouti",
+  "version": "0.0.1",
+  "description": "Backups for the apps on your server: MySQL/MariaDB databases and uploaded files, encrypted, scheduled and restore-tested. (In development.)",
+  "keywords": [
+    "backup",
+    "mysql",
+    "mariadb",
+    "restore",
+    "cli",
+    "restic",
+    "s3",
+    "laravel",
+    "devops"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "author": "Cherkaoui-El-Wafi <elwafi.cherkaoui@gmail.com>",
+  "homepage": "https://github.com/El-Wafi-Cherkaoui/agouti#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/El-Wafi-Cherkaoui/agouti.git"
+  },
+  "bugs": {
+    "url": "https://github.com/El-Wafi-Cherkaoui/agouti/issues"
+  },
+  "bin": {
+    "agouti": "bin/agouti.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
+}
