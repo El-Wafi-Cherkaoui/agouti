@@ -5,7 +5,9 @@ import * as add from "./commands/add.js";
 import * as backup from "./commands/backup.js";
 import * as connect from "./commands/connect.js";
 import * as init from "./commands/init.js";
+import * as protect from "./commands/protect.js";
 import * as restore from "./commands/restore.js";
+import * as rollback from "./commands/rollback.js";
 import * as schedule from "./commands/schedule.js";
 import * as verify from "./commands/verify.js";
 import { UserError, dim, red } from "./ui.js";
@@ -31,6 +33,8 @@ const COMMANDS = {
     root: true,
   },
   verify: { run: verify.verify, usage: verify.usage, options: verify.options, summary: "Test that backups can really be restored", root: true },
+  protect: { run: protect.protect, usage: protect.usage, options: protect.options, summary: "Make the backup storage append-only (attack-proof)", root: true },
+  rollback: { run: rollback.rollbackCommand, usage: rollback.usage, options: rollback.options, summary: "Undo an attack on append-only storage", root: true },
   connect: { run: connect.connect, usage: connect.usage, options: connect.options, summary: "Use an existing repository, e.g. on a new server", root: true },
 };
 

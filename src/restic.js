@@ -131,7 +131,9 @@ export async function probeRepository(bin, env) {
   if (code === EXIT.OK) return { state: "ok" };
   if (code === EXIT.NO_REPO) return { state: "missing" };
   if (code === EXIT.WRONG_PASSWORD) return { state: "wrong-key" };
-  return { state: "error", message: lastLine(stderr) };
+  // restic ends with the repository's address; the reason is on the "Fatal:" line.
+  const fatal = stderr.split("\n").find((l) => l.startsWith("Fatal:"));
+  return { state: "error", message: fatal ? fatal.replace(/^Fatal:\s*/, "") : lastLine(stderr) };
 }
 
 export function lastLine(text) {

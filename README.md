@@ -46,7 +46,6 @@ $ sudo agouti init
 ? Where should backups go?        Cloudflare R2
 ? Bucket endpoint                 https://<id>.r2.cloudflarestorage.com/backups
 ? Access key / secret             ********
-? Enable append-only protection?  Yes (recommended)
 
 ✓ Repository created and encrypted
 ⚠ Your recovery key (store it OUTSIDE this server, e.g. a password manager):
@@ -248,6 +247,34 @@ repository: s3:https://<id>.r2.cloudflarestorage.com/backups
 # The healthcheck URL and storage keys live in credentials.env (root-only).
 ```
 
+## Protect backups from attackers
+
+Backups are only as safe as the storage keys on your server. Someone who takes over the server (a hacked app, a stolen SSH key, ransomware) can use those keys to delete every backup, and often does before asking for money. `sudo agouti protect` makes the storage **append-only**: the server can add backups, but not delete or overwrite them.
+
+- **Cloudflare R2:** bucket lock rules on the folders restic keeps (`config`, `keys/`, `snapshots/`, `data/`). Agouti adds them with a Cloudflare API token you give once (it isn't stored), or you add them in the dashboard. Nothing in those folders can be deleted by anyone until you remove the rules. That includes Agouti's own cleanup: retention pauses and storage only grows. restic's `locks/` and `index/` stay open, because restic needs them and the index can be rebuilt from the data.
+- **AWS S3, Backblaze B2, other S3-compatible storage:** versioning, plus a key on the server that can't delete versions. Deleting or overwriting a file only hides it, and the previous version is kept for as long as your lifecycle rule says (30 days suggested). Agouti generates the exact IAM policy (AWS) or key command (B2). Retention keeps working as usual.
+- **SFTP and local folders** can't refuse deletes, so they can't be protected.
+
+```sh
+$ sudo agouti protect --check
+  ✓ versioning  on: deleted or overwritten files keep their previous version
+  ✓ key         can't delete old versions
+✓ Append-only storage is in place.
+```
+
+Agouti checks with the server's own key and never risks real data. On R2 it uses a write that can't succeed either way (Cloudflare checks the lock first). On versioned storage it uses a probe file of its own. Every scheduled backup checks again, so if someone removes the protection, your healthcheck tells you.
+
+**After an attack** on versioned storage, put everything back as it was a moment before, with the server's own key (even on a rebuilt server):
+
+```sh
+$ sudo agouti rollback --to "2026-11-03 02:00"
+Back to 2026-11-03 02:00:00 UTC: 21 files get their old version back, 3 files written since are hidden, 46 unchanged.
+? Roll back? Yes
+✓ Rolled back: 21 restored, 3 hidden. Nothing was deleted: it can be undone the same way.
+```
+
+Everything after that time is undone, including any genuine backups, so choose a time just before the attack. On R2, `agouti rollback` rebuilds the index, the only part an attacker could have touched. Then run `sudo agouti verify`.
+
 ## Verified backups
 
 A backup you have never restored is a guess. Once a week (with the scheduled backup), or whenever you run `sudo agouti verify`, Agouti restores the latest restore point of each app for real:
@@ -274,7 +301,7 @@ With binary logging on (the MySQL 8 default), MySQL only lets SUPER users create
 ## Security
 
 - Backups are **encrypted before they leave the server**.
-- **Append-only storage** (Object Lock, or an append-only REST server) means an attacker on your server can add backups but not delete them.
+- **Append-only storage** (`sudo agouti protect`) means an attacker on your server can add backups but not delete or overwrite them. See [Protect backups from attackers](#protect-backups-from-attackers).
 - Database passwords go through a private option file, never the command line, where `ps` could show them.
 - `agouti add` asks before reading your app's `.env`, keeps only the database settings from it, and recommends a MySQL user that can **only read** what a backup needs (it gives you the SQL).
 - Restores are copies unless you choose to replace, and replacing needs the app's name typed. The state before a replace is saved as a restore point first, so it can be undone.

@@ -7,6 +7,7 @@ import { loadHealthcheck, ping } from "../healthcheck.js";
 import { paths } from "../paths.js";
 import { DEFAULT_RETENTION, applyRetention } from "../retention.js";
 import { ensureRestic, resticEnv } from "../restic.js";
+import { checkProtection } from "../protection.js";
 import { loadState } from "../state.js";
 import { verifyDue } from "../verify.js";
 import { runVerify, verifySummary } from "./verify.js";
@@ -40,18 +41,46 @@ export async function scheduledBackup(names = [], { p = paths() } = {}) {
 
     const config = await requireConfig(p);
     const policy = config.retention ?? DEFAULT_RETENTION;
-    try {
-      const bin = await ensureRestic({ p, log: info });
-      const kept = await applyRetention(config, { bin, env: await resticEnv(config, p), policy, log: info });
-      const deleted = Object.values(kept.apps).reduce((n, a) => n + a.deleted, 0);
-      const line = `Retention (${policy.daily} daily, ${policy.weekly} weekly, ${policy.monthly} monthly): ${deleted ? `deleted ${deleted} old restore ${deleted === 1 ? "point" : "points"}` : "nothing to delete"}`;
-      info(`${green("✓")} ${line}`);
-      report.push(line);
-    } catch (err) {
-      ok = false;
-      info(`${red("✕")} ${err.message}`);
-      report.push(`Retention FAILED: ${err.message}`);
+
+    // Append-only storage: still in place? (Someone could have removed the lock
+    // rules or turned off versioning.) A few cheap requests, every run.
+    if (config.protection) {
+      try {
+        const check = await checkProtection(config, { p });
+        if (check.protected) {
+          info(`${green("✓")} Append-only storage: in place`);
+          report.push("Append-only storage: in place");
+        } else {
+          ok = false;
+          const broken = check.checks.filter((c) => !c.ok).map((c) => `${c.name} ${c.detail}`);
+          info(`${red("✕")} Append-only storage is no longer in place: ${broken.join("; ")}`);
+          report.push(`Append-only storage FAILED: ${broken.join("; ")}`);
+        }
+      } catch (err) {
+        ok = false;
+        info(`${red("✕")} Couldn't check the append-only storage: ${err.message}`);
+        report.push(`Append-only storage check FAILED: ${err.message}`);
+      }
     }
+
+    // R2 bucket locks: nothing can be deleted, so retention would only fail. Paused.
+    if (config.protection?.kind === "r2") {
+      const line = "Retention paused: the storage is append-only (R2 bucket locks), so nothing is deleted";
+      info(dim(line));
+      report.push(line);
+    } else
+      try {
+        const bin = await ensureRestic({ p, log: info });
+        const kept = await applyRetention(config, { bin, env: await resticEnv(config, p), policy, log: info });
+        const deleted = Object.values(kept.apps).reduce((n, a) => n + a.deleted, 0);
+        const line = `Retention (${policy.daily} daily, ${policy.weekly} weekly, ${policy.monthly} monthly): ${deleted ? `deleted ${deleted} old restore ${deleted === 1 ? "point" : "points"}` : "nothing to delete"}`;
+        info(`${green("✓")} ${line}`);
+        report.push(line);
+      } catch (err) {
+        ok = false;
+        info(`${red("✕")} ${err.message}`);
+        report.push(`Retention FAILED: ${err.message}`);
+      }
 
     // The weekly restore test, in the same run so the healthcheck hears about it.
     // "Restores but looks wrong" counts as a failure here: that's what should alert.

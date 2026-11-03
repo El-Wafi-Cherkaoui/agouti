@@ -267,3 +267,24 @@ test("interactive: turn on with a healthcheck, then turn off", async (t) => {
   assert.match(await captured(() => scheduleFlow(off, { p })), /Automatic backups are off/);
   assert.equal((await loadConfig(p)).schedule, undefined);
 });
+
+test("append-only storage: the nightly run re-checks it, and pauses retention on R2", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p } = await sandbox();
+  const hc = await healthcheckServer();
+  t.after(hc.close);
+  await saveHealthcheck(hc.url, p);
+  // Recorded as protected, but this (local) storage can't refuse deletes: as if the
+  // lock rules had been removed since.
+  const config = await loadConfig(p);
+  config.protection = { kind: "r2", checkedAt: new Date().toISOString() };
+  await saveConfig(config, p);
+
+  let ok;
+  const out = await captured(async () => (ok = await scheduledBackup([], { p })));
+  assert.equal(ok, false);
+  assert.match(out, /✕ Append-only storage is no longer in place: storage SFTP and local folders can't be made append-only/);
+  assert.match(out, /Retention paused: the storage is append-only/);
+  assert.equal(hc.pings.at(-1).path, "/ping/abc/fail");
+  assert.match(hc.pings.at(-1).body, /Append-only storage FAILED/);
+});
