@@ -88,12 +88,14 @@ Repeat for every app on the server. They all share one repository and one schedu
 
 ### 3. Turn on automatic backups
 
-```sh
-$ sudo agouti schedule --daily 03:00 --notify discord:https://...
+The app offers this right after your first app ("Turn on daily automatic backups now?"). Or in one line:
 
-✓ systemd timer installed: agouti-backup.timer
-✓ Weekly restore test: Sundays 04:00
-✓ Healthcheck ping configured. You'll be alerted if a backup is MISSED.
+```sh
+$ sudo agouti schedule --daily 03:00 --healthcheck https://hc-ping.com/<uuid>
+
+✓ Daily backups at 03:00 (Europe/Paris) · next: Wed 2026-11-04 03:00:00 CET
+✓ Healthcheck: hc-ping.com/1f2e3d…. You'll be alerted if a backup fails or doesn't run.
+Logs: journalctl -u agouti-backup
 ```
 
 That's it. From now on, every night Agouti:
@@ -101,10 +103,12 @@ That's it. From now on, every night Agouti:
 1. Dumps each database (without locking your tables).
 2. Backs up only the files that changed since last time.
 3. Tags both with one **restore point**, so the database and files always match.
-4. Deletes restore points you no longer need.
-5. Pings your healthcheck. If the ping doesn't arrive, you get an alert.
+4. Deletes restore points you no longer need (by default it keeps 7 daily, 4 weekly and 12 monthly). A restore point is kept or deleted as a whole, never half of it.
+5. Pings your healthcheck. If a backup fails, or the ping never arrives (server off, timer broken), you get an alert.
 
-Every week it restores the latest backup into a throwaway database and checks it.
+A timer can't tell you that it stopped running, so the healthcheck matters. [healthchecks.io](https://healthchecks.io) is free, or self-host it: create a check with period 1 day and grace 1 hour. The ping URL is kept in the root-only `credentials.env`, because anyone holding it could send fake "all good" pings.
+
+Coming soon: every week it restores the latest backup into a throwaway database and checks it.
 
 ## See how things stand
 
@@ -200,12 +204,10 @@ projects:
     verify:
       references: "SELECT path FROM media"   # check every referenced file is in the backup
 
-schedule: daily 03:00
+schedule: daily 03:00                          # written by `agouti schedule`
 retention: { daily: 7, weekly: 4, monthly: 12 }
 repository: s3:https://<id>.r2.cloudflarestorage.com/backups
-notify:
-  healthcheck: https://hc-ping.com/...
-  discord: https://discord.com/api/webhooks/...
+# The healthcheck URL and storage keys live in credentials.env (root-only).
 ```
 
 ## Verified backups

@@ -1,9 +1,13 @@
 // Shows a backup as it runs. Used by `agouti backup` and "Back up now" in the app.
 // In a terminal, a live progress line; elsewhere (timers, logs) only final lines.
 import { backupApps } from "../backup.js";
+import { requireConfig } from "../config.js";
 import { formatBytes } from "../detect.js";
+import { loadHealthcheck, ping } from "../healthcheck.js";
 import { paths } from "../paths.js";
-import { bold, dim, green, info, red, yellow } from "../ui.js";
+import { DEFAULT_RETENTION, applyRetention } from "../retention.js";
+import { ensureRestic, resticEnv } from "../restic.js";
+import { bold, dim, green, info, red, warn, yellow } from "../ui.js";
 
 export async function runBackup(names = [], { p = paths(), live = process.stdout.isTTY } = {}) {
   const results = await backupApps(names, { p, log: info, onEvent: reporter(live) });
@@ -16,6 +20,53 @@ export async function runBackup(names = [], { p = paths(), live = process.stdout
     );
   }
   return results;
+}
+
+// What the daily timer runs (`agouti backup --scheduled`): back up, delete restore
+// points no longer needed, and tell the healthcheck how it went. Output goes to the
+// journal: `journalctl -u agouti-backup`. Returns true if everything worked.
+export async function scheduledBackup(names = [], { p = paths() } = {}) {
+  const url = await loadHealthcheck(p).catch(() => null);
+  if (url) await ping(url, "start");
+  const report = [];
+  let ok = false;
+  try {
+    const results = await runBackup(names, { p, live: false });
+    for (const r of results) report.push(r.ok ? `${r.app}: ok` : `${r.app}: FAILED ${failureText(r)}`);
+    ok = results.every((r) => r.ok);
+
+    const config = await requireConfig(p);
+    const policy = config.retention ?? DEFAULT_RETENTION;
+    try {
+      const bin = await ensureRestic({ p, log: info });
+      const kept = await applyRetention(config, { bin, env: await resticEnv(config, p), policy, log: info });
+      const deleted = Object.values(kept.apps).reduce((n, a) => n + a.deleted, 0);
+      const line = `Retention (${policy.daily} daily, ${policy.weekly} weekly, ${policy.monthly} monthly): ${deleted ? `deleted ${deleted} old restore ${deleted === 1 ? "point" : "points"}` : "nothing to delete"}`;
+      info(`${green("✓")} ${line}`);
+      report.push(line);
+    } catch (err) {
+      ok = false;
+      info(`${red("✕")} ${err.message}`);
+      report.push(`Retention FAILED: ${err.message}`);
+    }
+  } catch (err) {
+    // Not set up, no apps, another backup running...: the healthcheck must hear about it too.
+    report.push(`FAILED: ${err.message}${err.hint ? `\n${err.hint}` : ""}`);
+    if (url) await ping(url, "fail", report.join("\n"));
+    throw err;
+  }
+  if (url) {
+    const sent = await ping(url, ok ? "success" : "fail", report.join("\n"));
+    if (!sent.ok) warn(`Couldn't ping the healthcheck: ${sent.error}`);
+  }
+  return ok;
+}
+
+function failureText(r) {
+  return ["database", "files"]
+    .filter((part) => !r[part].ok)
+    .map((part) => `${part}: ${r[part].error}`)
+    .join("; ");
 }
 
 function reporter(live) {
@@ -55,7 +106,7 @@ function partLine(part, r) {
   if (r.skipped) return `${dim("-")} ${label} ${dim("no folders selected")}`;
   if (part === "database") return `${green("✓")} ${label} ${formatBytes(r.bytes)} dumped · ${formatBytes(r.added)} new · ${secs}`;
   const changes = r.newFiles || r.changed ? `${r.newFiles} new, ${r.changed} changed` : "no changes";
-  return `${green("✓")} ${label} ${r.files.toLocaleString("en-US")} files · ${formatBytes(r.bytes)} · ${changes} · ${formatBytes(r.added)} uploaded · ${secs}`;
+  return `${green("✓")} ${label} ${r.files.toLocaleString("en-US")} ${r.files === 1 ? "file" : "files"} · ${formatBytes(r.bytes)} · ${changes} · ${formatBytes(r.added)} uploaded · ${secs}`;
 }
 
 function savedParts(r) {

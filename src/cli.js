@@ -5,6 +5,7 @@ import * as add from "./commands/add.js";
 import * as backup from "./commands/backup.js";
 import * as connect from "./commands/connect.js";
 import * as init from "./commands/init.js";
+import * as schedule from "./commands/schedule.js";
 import { UserError, dim, red } from "./ui.js";
 
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -13,6 +14,13 @@ const COMMANDS = {
   init: { run: init.init, usage: init.usage, options: init.options, summary: "Create the encrypted backup repository (once per server)", root: true },
   add: { run: add.add, usage: add.usage, options: add.options, summary: "Add an app to back up (database + uploaded files)", root: true },
   backup: { run: backup.backup, usage: backup.usage, options: backup.options, summary: "Back up apps now (all, or the ones named)", root: true },
+  schedule: {
+    run: schedule.schedule,
+    usage: schedule.usage,
+    options: schedule.options,
+    summary: "Back up every app automatically, every day",
+    root: true,
+  },
   connect: { run: connect.connect, usage: connect.usage, options: connect.options, summary: "Use an existing repository, e.g. on a new server", root: true },
 };
 
@@ -30,7 +38,7 @@ Options:
   -h, --help     Show help for a command
   -v, --version  Show the version
 
-Agouti is in development: schedule and restore are coming next.
+Agouti is in development: restore is coming next.
 https://github.com/El-Wafi-Cherkaoui/agouti`;
 
 export async function main(argv) {

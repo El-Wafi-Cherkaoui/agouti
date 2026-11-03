@@ -6,12 +6,15 @@ import { Separator } from "@inquirer/prompts";
 import { printCreated } from "./commands/init.js";
 import { addFlow } from "./flows/add.js";
 import { runBackup } from "./flows/backup.js";
+import { printStatus, scheduleFlow } from "./flows/schedule.js";
 import { loadConfig } from "./config.js";
+import { loadHealthcheck } from "./healthcheck.js";
 import { paths } from "./paths.js";
 import { askRecoveryKey, askStorage, defaultAsk } from "./prompts.js";
 import { normalizeRecoveryKey } from "./recovery-key.js";
 import { connectRepository, createRepository, repositoryStatus } from "./repository.js";
 import { loadState } from "./state.js";
+import { scheduleStatus } from "./schedule.js";
 import { describeRepository } from "./storage.js";
 import { UserError, bold, dim, green, info, ok, red, warn, yellow } from "./ui.js";
 
@@ -67,7 +70,12 @@ async function createFlow(ask, p) {
     warn(`Please do. It's the only way to restore if this server is lost:\n  ${bold(key)}\n`);
   }
   ok("Storage is ready.");
-  if (await ask.confirm({ message: "Add your first app now?", default: true })) await addFlow(ask, { p });
+  if (!(await ask.confirm({ message: "Add your first app now?", default: true }))) return;
+  await addFlow(ask, { p });
+  // Last step of the setup: without a schedule, backups only happen when someone remembers.
+  if (!Object.keys((await loadConfig(p))?.projects ?? {}).length) return;
+  if (await ask.confirm({ message: "Turn on daily automatic backups now?", default: true })) await scheduleFlow(ask, { p });
+  else warn("Automatic backups are off. Turn them on from the home screen when you're ready.");
 }
 
 async function connectFlow(ask, p) {
@@ -86,23 +94,38 @@ async function home(config, ask, p) {
   if (apps.length === 0) info(dim("No apps yet. Add your first one to start backing up."));
   else info(dim(`  ${"APP".padEnd(14)}LAST BACKUP`));
   for (const [name] of apps) info(`  ${bold(name.padEnd(14))}${lastBackupLabel(state.projects[name])}`);
+  const schedule = await scheduleStatus(config);
+  if (apps.length) {
+    info("");
+    printStatus(schedule, await loadHealthcheck(p), config);
+  }
   info("");
 
   const backupChoice = { value: "backup", name: "Back up now", description: "Database and files, as one restore point." };
   const addChoice = { value: "add", name: "Add an app", description: "Back up another app's database and uploaded files." };
+  const scheduleChoice = {
+    value: "schedule",
+    name: schedule.enabled ? "Automatic backups" : "Turn on automatic backups",
+    description: schedule.enabled
+      ? "Change the time or the healthcheck, or turn them off."
+      : "Back up every app daily, delete old restore points, alert on failure.",
+  };
   const action = await ask.select({
     message: "What do you want to do?",
     pageSize: 12,
     choices: [
       // Working actions first, so the cursor never starts on something unavailable;
       // the most likely next step first.
-      ...(apps.length ? [backupChoice, addChoice] : [addChoice]),
+      ...(apps.length
+        ? schedule.enabled && !schedule.problem
+          ? [backupChoice, addChoice, scheduleChoice]
+          : [backupChoice, scheduleChoice, addChoice]
+        : [addChoice]),
       { value: "check", name: "Check storage", description: "Make sure this server can still reach the repository." },
       { value: "key", name: "Show recovery key", description: "In case you didn't save it during setup." },
       { value: "quit", name: "Quit" },
       new Separator(dim("── Coming soon ──")),
       { value: "restore", name: "Restore", disabled: true },
-      { value: "schedule", name: "Schedule automatic backups", disabled: true },
     ],
   });
 
@@ -110,6 +133,7 @@ async function home(config, ask, p) {
     if (action === "quit") return "quit";
     if (action === "backup") await backupNow(ask, apps, p);
     if (action === "add") await addFlow(ask, { p });
+    if (action === "schedule") await scheduleFlow(ask, { p });
     if (action === "check") await checkStorage(config, p);
     if (action === "key") await showKey(ask, p);
   } catch (err) {

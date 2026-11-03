@@ -98,7 +98,8 @@ function bunzip2(buf) {
 export async function resticEnv(config, p = paths(), extra = {}) {
   return {
     ...process.env,
-    ...(await loadCredentials(p)),
+    // Agouti's own settings (e.g. the healthcheck URL) share the file but aren't restic's business.
+    ...Object.fromEntries(Object.entries(await loadCredentials(p)).filter(([k]) => !k.startsWith("AGOUTI_"))),
     RESTIC_REPOSITORY: config.repository,
     RESTIC_PASSWORD_FILE: p.recoveryKey,
     RESTIC_CACHE_DIR: p.cacheDir,
@@ -116,6 +117,8 @@ export function run(bin, args, { env = process.env, stdin } = {}) {
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
     child.on("error", reject);
+    // A program that exits without reading its input (EPIPE) is not an error here.
+    child.stdin.on("error", () => {});
     child.on("close", (code) => resolve({ code, stdout, stderr }));
     if (stdin && typeof stdin.pipe === "function") stdin.pipe(child.stdin);
     else child.stdin.end(stdin ?? "");
