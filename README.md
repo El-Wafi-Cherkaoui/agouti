@@ -60,20 +60,29 @@ $ sudo agouti init
 $ sudo agouti add /var/www/shop
 
 Detected: Laravel 11
-  Database   MySQL 8.0  shop_prod @ 127.0.0.1   (from .env)
-  Files      [x] storage/app/public    2.1 GB  14,302 files
-             [x] storage/app/private   640 MB   3,118 files
-             [ ] storage/logs          (excluded: logs)
-             [ ] storage/framework     (excluded: cache)
 
-? Create a least-privilege MySQL backup user?  Yes
-? Run a first backup now?                       Yes
+⚠ Agouti needs this app's database connection details.
+  They're in /var/www/shop/.env, which usually also holds the app's most
+  sensitive secrets (APP_KEY, mail and payment keys...).
+  [what Agouti would read and keep, how serious it is, what we suggest]
 
-Backing up shop ...
-  database   48 MB → 9 MB compressed       ✓ 6s
-  files      2.7 GB, 17,420 files           ✓ 11m 32s
-✓ Restore point shop@2026-11-03T14:20  (verified: pending)
+? How should Agouti connect to the database?
+❯ Create a read-only backup user (recommended)
+  Read the details from .env
+  Enter the details of an existing database user
+
+✓ Connected: MySQL 8.0 · shop_prod · 62 tables · 48 MB
+
+? Which folders hold uploaded files to back up?
+❯◉ storage/app/private    640 MB · 3,118 files
+ ◉ storage/app/public     2.1 GB · 14,302 files
+ ◯ storage/logs           (logs)
+ ◯ storage/framework      (cache)
+
+✓ Added shop
 ```
+
+Agouti never reads `.env` without asking. If you allow it, it keeps only the `DB_*` lines and discards the rest. Even then, we recommend the read-only backup user: Agouti gives you the SQL, and a leaked backup password can't change or delete your data.
 
 Repeat for every app on the server. They all share one repository and one schedule.
 
@@ -167,7 +176,7 @@ agouti backup shop
 | Node.js | `uploads/` and similar | `node_modules` |
 | Docker | named volumes used for uploads | |
 
-Database connection details come from `.env`, `docker-compose.yml`, `schema.prisma`, `database.yml` or Django settings. You always confirm what was found, and you can change it.
+Database connection details can come from `.env`, `docker-compose.yml`, `schema.prisma`, `database.yml` or Django settings, but only after you allow Agouti to read that file. You can always enter them yourself instead. (v0.1: Laravel `.env`.)
 
 ## Configuration
 
@@ -177,7 +186,13 @@ Database connection details come from `.env`, `docker-compose.yml`, `schema.pris
 projects:
   shop:
     path: /var/www/shop
-    database: { from: .env }
+    database:
+      engine: mysql
+      name: shop_prod
+      host: 127.0.0.1
+      port: 3306
+      user: agouti_backup
+      credentials: /etc/agouti/projects/shop.cnf   # password lives here, root-only
     files:
       - storage/app/public
       - storage/app/private
@@ -208,7 +223,7 @@ Each restore point is marked `✓ verified`, `⚠ unverified` or `✕ failed`.
 - Backups are **encrypted before they leave the server**.
 - **Append-only storage** (Object Lock, or an append-only REST server) means an attacker on your server can add backups but not delete them.
 - Database passwords go through a private option file, never the command line, where `ps` could show them.
-- `agouti add` can create a MySQL user that can **only read** what a backup needs.
+- `agouti add` asks before reading your app's `.env`, keeps only the database settings from it, and recommends a MySQL user that can **only read** what a backup needs (it gives you the SQL).
 - Restores never overwrite without showing what changes and asking you to type the database name. The old database is kept until you remove it.
 
 ## Under the hood

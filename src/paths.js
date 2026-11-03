@@ -12,6 +12,8 @@ export function paths(env = process.env) {
     // Secrets live outside agouti.yml so the config can be read and shared freely.
     credentials: join(configDir, "credentials.env"),
     recoveryKey: join(configDir, "recovery-key"),
+    // One MySQL option file per app with its database credentials (root-only).
+    projectsDir: join(configDir, "projects"),
     binDir: join(dataDir, "bin"),
     cacheDir: join(dataDir, "cache"),
   };

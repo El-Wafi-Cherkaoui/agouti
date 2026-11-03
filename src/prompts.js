@@ -9,6 +9,7 @@ export const defaultAsk = {
   input: inquirer.input,
   password: inquirer.password,
   confirm: inquirer.confirm,
+  checkbox: inquirer.checkbox,
 };
 
 const nonEmpty = (v) => (v.trim() ? true : "Required");

@@ -10,6 +10,7 @@ import { paths } from "../src/paths.js";
 import { askStorage } from "../src/prompts.js";
 import { ensureRestic } from "../src/restic.js";
 import { localDiskWarning } from "../src/storage.js";
+import { captured, scripted } from "./helpers.js";
 
 const CACHE = fileURLToPath(new URL("./.cache", import.meta.url));
 let restic;
@@ -22,32 +23,6 @@ before(async () => {
     console.warn(`skipping app tests: ${err.message}`);
   }
 });
-
-// Each step: [kind, message regexp, answer]. The answer may be a function of the
-// prompt options, to inspect what was offered.
-function scripted(steps) {
-  const take = (kind) => async (opts) => {
-    const step = steps.shift();
-    assert.ok(step, `unexpected ${kind} prompt: "${opts.message}"`);
-    assert.equal(kind, step[0], `expected a ${step[0]} prompt, got ${kind}: "${opts.message}"`);
-    assert.match(opts.message, step[1]);
-    return typeof step[2] === "function" ? step[2](opts) : step[2];
-  };
-  return { select: take("select"), input: take("input"), password: take("password"), confirm: take("confirm"), remaining: steps };
-}
-
-// Collects what the app prints.
-async function captured(fn) {
-  const lines = [];
-  const orig = console.log;
-  console.log = (...a) => lines.push(a.join(" "));
-  try {
-    await fn();
-  } finally {
-    console.log = orig;
-  }
-  return lines.join("\n");
-}
 
 // Temp dirs are usually on the system disk, which triggers the local-storage warning.
 const confirmIfSystemDisk = (dir) => (localDiskWarning(dir) ? [["confirm", /Use this directory anyway/, true]] : []);
@@ -67,12 +42,14 @@ test("fresh server: guided setup, insists on saving the key, then the home scree
     ...confirmIfSystemDisk(repo),
     ["confirm", /saved the recovery key/, false],
     ["confirm", /saved the recovery key/, true],
+    ["confirm", /Add your first app now/, false],
     [
       "select",
       /What do you want to do/,
       (opts) => {
-        const add = opts.choices.find((c) => c.value === "add");
-        assert.ok(add.disabled, "add isn't built yet, so it must be shown as unavailable");
+        const backup = opts.choices.find((c) => c.value === "backup");
+        assert.ok(backup.disabled, "backup isn't built yet, so it must be shown as unavailable");
+        assert.ok(!opts.choices.find((c) => c.value === "add").disabled);
         return "check";
       },
     ],
@@ -103,6 +80,7 @@ test("new server: connect, recover from a wrong key without restarting", async (
         ["input", /Directory/, first.repo],
         ...confirmIfSystemDisk(first.repo),
         ["confirm", /saved/, true],
+        ["confirm", /Add your first app now/, false],
         ["select", /What do you want to do/, "quit"],
       ]),
     }),

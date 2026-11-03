@@ -4,6 +4,7 @@
 import { readFile } from "node:fs/promises";
 import { Separator } from "@inquirer/prompts";
 import { printCreated } from "./commands/init.js";
+import { addFlow } from "./flows/add.js";
 import { loadConfig } from "./config.js";
 import { paths } from "./paths.js";
 import { askRecoveryKey, askStorage, defaultAsk } from "./prompts.js";
@@ -63,7 +64,8 @@ async function createFlow(ask, p) {
   while (!(await ask.confirm({ message: "Have you saved the recovery key somewhere outside this server?", default: false }))) {
     warn(`Please do. It's the only way to restore if this server is lost:\n  ${bold(key)}\n`);
   }
-  ok("All set. Next, add the apps you want to back up.");
+  ok("Storage is ready.");
+  if (await ask.confirm({ message: "Add your first app now?", default: true })) await addFlow(ask, { p });
 }
 
 async function connectFlow(ask, p) {
@@ -79,7 +81,10 @@ async function home(config, ask, p) {
   const apps = Object.entries(config.projects ?? {});
   info(`\n${bold("agouti")} · ${apps.length} ${apps.length === 1 ? "app" : "apps"} · repo: ${describeRepository(config.repository)}`);
   if (apps.length === 0) info(dim("No apps yet. Add your first one to start backing up."));
-  for (const [name, project] of apps) info(`  ${bold(name.padEnd(12))} ${dim(project.path ?? "")}`);
+  for (const [name, project] of apps) {
+    const files = project.files?.length ?? 0;
+    info(`  ${bold(name.padEnd(12))} ${project.path}  ${dim(`database ${project.database?.name ?? "?"} · ${files} ${files === 1 ? "folder" : "folders"}`)}`);
+  }
   info("");
 
   const action = await ask.select({
@@ -87,11 +92,11 @@ async function home(config, ask, p) {
     pageSize: 10,
     choices: [
       // Working actions first, so the cursor never starts on something unavailable.
+      { value: "add", name: "Add an app", description: "Back up another app's database and uploaded files." },
       { value: "check", name: "Check storage", description: "Make sure this server can still reach the repository." },
       { value: "key", name: "Show recovery key", description: "In case you didn't save it during setup." },
       { value: "quit", name: "Quit" },
       new Separator(dim("── Coming soon ──")),
-      { value: "add", name: "Add an app", disabled: true },
       { value: "backup", name: "Back up now", disabled: true },
       { value: "restore", name: "Restore", disabled: true },
       { value: "schedule", name: "Schedule automatic backups", disabled: true },
@@ -100,6 +105,7 @@ async function home(config, ask, p) {
 
   try {
     if (action === "quit") return "quit";
+    if (action === "add") await addFlow(ask, { p });
     if (action === "check") await checkStorage(config, p);
     if (action === "key") await showKey(ask, p);
   } catch (err) {
