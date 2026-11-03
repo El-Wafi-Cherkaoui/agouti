@@ -50,7 +50,7 @@ export async function ping(url, kind = "success", body = "", { timeoutMs = 10000
       error = `HTTP ${res.status}`;
       if (res.status < 500) break; // wrong URL: retrying won't help
     } catch (err) {
-      error = err.cause?.code ?? err.message;
+      error = err.cause?.code ?? err.cause?.message ?? err.message;
     }
     if (attempt < tries) await new Promise((r) => setTimeout(r, 1000 * attempt));
   }

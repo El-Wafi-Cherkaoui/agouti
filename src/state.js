@@ -36,6 +36,13 @@ export async function recordVerify(name, result, p = paths()) {
   await writeAtomic(stateFile(p), JSON.stringify(state, null, 2) + "\n", 0o644);
 }
 
+// The last scheduled run's outcome, to say "working again" after a failure.
+export async function recordScheduled(ok, p = paths()) {
+  const state = await loadState(p);
+  state.lastScheduled = { at: new Date().toISOString(), ok };
+  await writeAtomic(stateFile(p), JSON.stringify(state, null, 2) + "\n", 0o644);
+}
+
 export async function acquireLock(p = paths()) {
   const file = lockFile(p);
   for (let attempt = 0; attempt < 2; attempt++) {

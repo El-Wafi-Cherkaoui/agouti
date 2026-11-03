@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { app } from "./app.js";
 import * as add from "./commands/add.js";
+import * as alerts from "./commands/alerts.js";
 import * as backup from "./commands/backup.js";
 import * as connect from "./commands/connect.js";
 import * as init from "./commands/init.js";
@@ -30,6 +31,13 @@ const COMMANDS = {
     usage: schedule.usage,
     options: schedule.options,
     summary: "Back up every app automatically, every day",
+    root: true,
+  },
+  alerts: {
+    run: alerts.alerts,
+    usage: alerts.usage,
+    options: alerts.options,
+    summary: "Get a message on Discord, Slack, Telegram... when something fails",
     root: true,
   },
   verify: { run: verify.verify, usage: verify.usage, options: verify.options, summary: "Test that backups can really be restored", root: true },

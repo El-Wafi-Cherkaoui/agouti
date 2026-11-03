@@ -253,7 +253,7 @@ async function verifyFiles(app, point, { bin, env, p }) {
       // Unchanged since the backup (same size and modification time)? Then the
       // restored copy must be byte-for-byte the live one.
       const live = await stat(n.path).catch(() => null);
-      if (live && live.size === n.size && Math.floor(live.mtimeMs) === Math.floor(Date.parse(n.mtime))) {
+      if (live && live.size === n.size && Math.abs(live.mtimeMs - preciseMs(n.mtime)) < 1) {
         compared++;
         if ((await sha256(restored)) !== (await sha256(n.path))) bad.push(`${n.path}: content differs from the live file, which hasn't changed`);
       }
@@ -286,6 +286,12 @@ function compare(result, prev) {
   if (files?.ok && !files.skipped && prev.files?.total >= 20 && files.total < prev.files.total / 2) {
     result.problems.push(`Files: ${fmt(prev.files.total)} in the last test, ${fmt(files.total)} now.`);
   }
+}
+
+// restic keeps nanoseconds; Date.parse stops at milliseconds. Keep the rest.
+export function preciseMs(iso) {
+  const frac = String(iso).match(/\.(\d+)/)?.[1] ?? "";
+  return Date.parse(iso) + Number(`0.${frac.slice(3) || "0"}`);
 }
 
 const fmt = (n) => Number(n).toLocaleString("en-US");

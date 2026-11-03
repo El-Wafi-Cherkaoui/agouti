@@ -116,19 +116,45 @@ $ agouti
 ```
 
 ```
- agouti · 3 projects · repo: R2 (append-only)                        ? help
- ─────────────────────────────────────────────────────────────────────────────
-  PROJECT   LAST BACKUP      SIZE     POINTS   VERIFIED
- ▸ shop     ✓ 6h ago         2.8 GB   23       ✓ Sun 04:00
-   blog     ✓ 6h ago         310 MB   23       ✓ Sun 04:00
-   crm      ✕ failed 6h ago  1.1 GB   22       ⚠ 8 days ago
- ─────────────────────────────────────────────────────────────────────────────
-  Enter details   b backup now   r restore   l logs   v verify now   q quit
+agouti · 3 apps · repo: R2 · append-only (R2 locks)
+  APP           LAST BACKUP                   RESTORE TEST
+  shop          ✓ 6h ago                      ✓ 2 days ago
+  blog          ✓ 6h ago                      ✓ 2 days ago
+  crm           ✕ failed 6h ago (last good: yesterday)  ⚠ 2 days ago
+
+✓ Daily backups at 03:00 (Europe/Paris)
+  next: Wed 2026-11-04 03:00:00 CET
+  keeps 7 daily, 4 weekly, 12 monthly restore points
+  healthcheck: hc-ping.com/1f2e3d…
+  restore test: weekly
+
+? What do you want to do?
+❯ Back up now
+  Add an app
+  Automatic backups
+  Restore
+  Test a restore
+  Alerts
+  ...
 ```
 
-When something fails, you also get a message:
+### Alerts
 
-> ✕ **shop** backup failed at 03:00: MySQL access denied for user 'agouti_backup'. Run `agouti doctor shop`.
+When a scheduled backup has a problem, you get a message saying what went wrong and what to do, on **Discord, Slack, Telegram, ntfy** (push to your phone) or any **webhook**:
+
+> ✕ Agouti on vps-1: a problem with tonight's backup
+> • crm: the database wasn't backed up: Access denied for user 'agouti_crm'@'localhost'
+> &nbsp;&nbsp;Has the password of agouti_crm changed? Credentials are in /etc/agouti/projects/crm.cnf.
+
+You get one more message when things work again. Nothing is sent while everything works.
+
+```sh
+sudo agouti alerts                                   # set up (sends a test)
+sudo agouti alerts --add discord --to https://discord.com/api/webhooks/...
+sudo agouti alerts --add telegram --to <bot token>   # after sending the bot a message
+```
+
+Alerts cover what a run reports: failed backups, a restore test that failed or looks wrong, storage that's no longer append-only, and cleanup errors. A server that's off can't send anything, which is what the healthcheck is for: it alerts you when a run *doesn't happen*. For email, use your healthcheck's email notifications, which include Agouti's report. Webhook URLs and bot tokens are kept in the root-only `credentials.env`.
 
 ## Restore
 

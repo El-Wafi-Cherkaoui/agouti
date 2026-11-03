@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { loadConfig, loadCredentials, saveConfig, saveRecoveryKey } from "../src/config.js";
+import { loadConfig, loadCredentials, saveConfig, saveCredentials, saveRecoveryKey } from "../src/config.js";
 import { scheduledBackup } from "../src/flows/backup.js";
 import { maskUrl, scheduleFlow } from "../src/flows/schedule.js";
 import { loadHealthcheck, saveHealthcheck, validateHealthcheckUrl } from "../src/healthcheck.js";
@@ -248,6 +248,7 @@ test("interactive: turn on with a healthcheck, then turn off", async (t) => {
     ["input", /Back up every day at/, "4:30"],
     ["select", /Set up a healthcheck/, "yes"],
     ["input", /Ping URL/, hc.url],
+    ["confirm", /Also get a message/, false],
     ["confirm", /Set up weekly restore tests/, false],
   ]);
   const out = await captured(() => scheduleFlow(ask, { p }));
@@ -287,4 +288,36 @@ test("append-only storage: the nightly run re-checks it, and pauses retention on
   assert.match(out, /Retention paused: the storage is append-only/);
   assert.equal(hc.pings.at(-1).path, "/ping/abc/fail");
   assert.match(hc.pings.at(-1).body, /Append-only storage FAILED/);
+});
+
+test("alerts: a message saying what failed and what to do, then one when it works again", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p } = await sandbox();
+  const hook = await healthcheckServer(); // records POSTs: a stand-in webhook
+  t.after(hook.close);
+  // Written directly: saveAlert only accepts https URLs.
+  await saveCredentials({ ...(await loadCredentials(p)), AGOUTI_ALERT_WEBHOOK: hook.url.replace("/ping/abc", "/hook") }, p);
+  const sent = () => hook.pings.map((x) => JSON.parse(x.body));
+
+  process.env.FAIL_DUMP = "1";
+  try {
+    await captured(() => scheduledBackup([], { p }));
+  } finally {
+    delete process.env.FAIL_DUMP;
+  }
+  let [failure] = sent();
+  assert.equal(failure.event, "failure");
+  assert.match(failure.title, /^✕ Agouti on .+: a problem with tonight's backup$/);
+  assert.deepEqual(failure.lines, [
+    "shop: the database wasn't backed up: Got error: 1045: Access denied for user 'shop'@'localhost'",
+    `  Has the password of shop changed? Credentials are in ${join(p.configDir, "..", "shop.cnf")}.`,
+    "  Details: journalctl -u agouti-backup",
+  ]);
+
+  await captured(() => scheduledBackup([], { p }));
+  assert.equal(sent()[1].event, "recovered");
+  assert.match(sent()[1].title, /backups are working again/);
+
+  await captured(() => scheduledBackup([], { p }));
+  assert.equal(sent().length, 2, "all good, and was good: no message");
 });

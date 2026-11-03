@@ -6,6 +6,7 @@ import { printCreated } from "./commands/init.js";
 import { addFlow } from "./flows/add.js";
 import { runBackup } from "./flows/backup.js";
 import { offerBringBack } from "./flows/adopt.js";
+import { alertsFlow } from "./flows/alerts.js";
 import { protectFlow, protectionLabel } from "./flows/protect.js";
 import { protectionKind } from "./protection.js";
 import { restoreFlow } from "./flows/restore.js";
@@ -155,6 +156,7 @@ async function home(config, ask, p) {
               description: "Make the storage append-only, so an attacker on this server can't delete backups.",
             },
           ]),
+      ...(apps.length ? [{ value: "alerts", name: "Alerts", description: "Get a message on Discord, Slack, Telegram or ntfy when something fails." }] : []),
       { value: "check", name: "Check storage", description: "Make sure this server can still reach the repository." },
       { value: "key", name: "Show recovery key", description: "In case you didn't save it during setup." },
       { value: "quit", name: "Quit" },
@@ -169,6 +171,7 @@ async function home(config, ask, p) {
     if (action === "restore") await restoreFlow(ask, { p });
     if (action === "verify") await verifyFlow(ask, { p });
     if (action === "protect") await protectFlow(ask, { p });
+    if (action === "alerts") await alertsFlow(ask, { p });
     if (action === "check") await checkStorage(config, p);
     if (action === "key") await showKey(ask, p);
   } catch (err) {

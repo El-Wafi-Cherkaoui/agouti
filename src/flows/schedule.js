@@ -8,6 +8,8 @@ import { DEFAULT_RETENTION } from "../retention.js";
 import { SERVICE, TIMER, agoutiCommand, installSchedule, parseTime, removeSchedule, scheduleStatus, serverTimezone } from "../schedule.js";
 import { UserError, bold, dim, green, info, ok, red, warn, yellow } from "../ui.js";
 import { explainVerify, setupVerifyFlow } from "./verify.js";
+import { loadAlerts } from "../alerts.js";
+import { addChannel } from "./alerts.js";
 
 export async function scheduleFlow(ask, { p = paths() } = {}) {
   const config = await requireConfig(p);
@@ -56,6 +58,9 @@ It runs as a systemd timer (${TIMER}) on this server.
   const time = await askTime(ask, "03:00");
   let url = await loadHealthcheck(p);
   if (!url) url = await askHealthcheck(ask, p);
+  if (!(await loadAlerts(p)).length) {
+    if (await ask.confirm({ message: "Also get a message (Discord, Slack, Telegram, ntfy) saying what failed?", default: true })) await addChannel(ask, { p });
+  }
   if (!config.verify) {
     explainVerify();
     if (await ask.confirm({ message: "Set up weekly restore tests? (recommended)", default: true })) {
