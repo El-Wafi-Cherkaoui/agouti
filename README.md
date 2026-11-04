@@ -6,7 +6,7 @@
 
 Set it up in ten minutes. Forget about it. Trust it on the worst day.
 
-> **Status:** in design. This README describes the intended v0.1 and is not published yet.
+> **Status:** in development, and not published yet: `npm install -g agouti` only gets a placeholder for now. The commands below work from a checkout of this repository. Sections marked *planned* aren't built.
 
 </div>
 
@@ -26,7 +26,7 @@ npm install -g agouti
 
 A single binary that doesn't need Node.js and a Docker image are planned too.
 
-Runs on Linux servers. Needs access to `mysqldump`, either installed locally or inside your database's Docker container.
+Runs on Linux servers. Needs `bzip2` (to unpack restic) and `mysqldump` or `mariadb-dump` on the server (`apt install bzip2 mysql-client`, or `mariadb-client`). A database inside a Docker container isn't supported directly yet: its port must be reachable from the server.
 
 ## Get started
 
@@ -34,7 +34,7 @@ Runs on Linux servers. Needs access to `mysqldump`, either installed locally or 
 sudo agouti
 ```
 
-That's the only command you need to remember. On a new server it walks you through setup: storage, then your apps, then the schedule. After that it opens a home screen where every action (add an app, back up, restore, view logs) is a keypress away.
+That's the only command you need to remember. On a new server it walks you through setup: storage, then your apps, then the schedule. After that it opens a home screen where every action (add an app, back up, restore, test a restore) is a keypress away.
 
 Every action is also a plain command, for scripts, timers and quick use over SSH. The steps below show the commands; the interactive app asks the same questions.
 
@@ -154,7 +154,7 @@ sudo agouti alerts --add discord --to https://discord.com/api/webhooks/...
 sudo agouti alerts --add telegram --to <bot token>   # after sending the bot a message
 ```
 
-Alerts cover what a run reports: failed backups, a restore test that failed or looks wrong, storage that's no longer append-only, and cleanup errors. A server that's off can't send anything, which is what the healthcheck is for: it alerts you when a run *doesn't happen*. For email, use your healthcheck's email notifications, which include Agouti's report. Webhook URLs and bot tokens are kept in the root-only `credentials.env`.
+Alerts cover what a run reports: failed backups, files that couldn't be read, a restore test that failed or looks wrong, storage that's no longer append-only, and cleanup errors. A server that's off can't send anything, which is what the healthcheck is for: it alerts you when a run *doesn't happen*. For email, use your healthcheck's email notifications, which include Agouti's report. Webhook URLs and bot tokens are kept in the root-only `credentials.env`.
 
 ## Restore
 
@@ -234,16 +234,11 @@ agouti backup shop
 
 ## What it detects
 
-| Framework | Backs up | Skips |
-| --- | --- | --- |
-| Laravel | `storage/app/public`, `storage/app/private` | `storage/framework`, `storage/logs`, `bootstrap/cache` |
-| WordPress | `wp-content/uploads` | `wp-content/cache` |
-| Django | `MEDIA_ROOT` | `STATIC_ROOT` |
-| Rails | `storage/` (Active Storage) | `tmp/`, `log/` |
-| Node.js | `uploads/` and similar | `node_modules` |
-| Docker | named volumes used for uploads | |
+Today Agouti detects **Laravel**: it backs up `storage/app/public` and `storage/app/private`, skips `storage/framework`, `storage/logs` and `bootstrap/cache`, and can read the database details from `.env`, but only after you allow it.
 
-Database connection details can come from `.env`, `docker-compose.yml`, `schema.prisma`, `database.yml` or Django settings, but only after you allow Agouti to read that file. You can always enter them yourself instead. (v0.1: Laravel `.env`.)
+Any other app works too if you enter its database details and folders yourself.
+
+*Planned:* detection for WordPress, Django, Rails, Node.js and Docker volumes.
 
 ## Configuration
 
@@ -266,8 +261,6 @@ projects:
     exclude:                                   # left out of the backups
       - storage/app/public/thumbs              # a path inside one of the folders above
       - "*.tmp"                                # or a name, anywhere inside them
-    verify:
-      references: "SELECT path FROM media"   # check every referenced file is in the backup
 
 schedule: daily 03:00                          # written by `agouti schedule`
 retention: { daily: 7, weekly: 4, monthly: 12 }
@@ -352,7 +345,7 @@ Agouti backs up **the apps running on your server**: their databases and their f
 
 ## Roadmap
 
-- **v0.1:** detect → back up (database + files) → schedule → retention → healthcheck → restore (full, database, files, single file) → restore on a new server → weekly restore tests
+- **v0.1:** detect (Laravel) → back up (database + files) → schedule → retention → healthcheck → restore (full, database, files, single file) → restore on a new server → weekly restore tests
 - **v0.2:** the reference check (files your database points to) · status TUI
 - **Later:** point-in-time recovery from binlogs · `mydumper` for large databases · dumps from a replica · Postgres · backing up S3-hosted uploads · single binary and Docker image
 

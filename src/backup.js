@@ -5,7 +5,7 @@
 // and the interactive app render them.
 import { stat } from "node:fs/promises";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { requireConfig } from "./config.js";
 import { excludePatterns } from "./excludes.js";
 import { dumpCommand } from "./mysql.js";
@@ -83,7 +83,7 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [] }) {
       },
     );
     if (r.code !== EXIT.OK || !r.summary) {
-      const error = describeFailure(r, "mysqldump");
+      const error = describeFailure(r, basename(argv[0]));
       return { ok: false, error, hint: databaseHint(error, project) };
     }
     return { ok: true, snapshot: r.summary.snapshot_id, bytes: r.summary.total_bytes_processed, added: r.summary.data_added };
@@ -107,9 +107,10 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [] }) {
     if (patterns.length && r.summary.total_files_processed === 0) {
       return { ok: false, error: "The exclude rules left out every file, so no files were saved.", hint: `Check exclude for ${name} in agouti.yml: ${patterns.join(", ")}` };
     }
-    const unreadable = r.messages.filter((m) => m.message_type === "error").length;
+    // A file deleted while the backup ran isn't missing from anything; one that can't be read is.
+    const unreadable = r.errors.filter((m) => !/no such file or directory/i.test(m.error?.message ?? ""));
     const warnings = [
-      ...(unreadable ? [`${unreadable} ${unreadable === 1 ? "file" : "files"} couldn't be read and ${unreadable === 1 ? "is" : "are"} missing from this backup.`] : []),
+      ...(unreadable.length ? [unreadableText(unreadable)] : []),
       ...ignored.map((x) => `Exclude rule ignored, so these files were backed up: ${x}.`),
     ];
     return {
@@ -120,6 +121,7 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [] }) {
       added: r.summary.data_added,
       newFiles: r.summary.files_new,
       changed: r.summary.files_changed,
+      ...(unreadable.length ? { unreadable: unreadableText(unreadable) } : {}),
       ...(warnings.length ? { warning: warnings.join(" ") } : {}),
     };
   });
@@ -147,6 +149,12 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [] }) {
   };
   onEvent({ type: "app-done", app: name, result });
   return result;
+}
+
+function unreadableText(errors) {
+  const n = errors.length;
+  const items = errors.slice(0, 3).map((m) => m.item ?? m.error?.message).filter(Boolean);
+  return `${n} ${n === 1 ? "file" : "files"} couldn't be read and ${n === 1 ? "is" : "are"} missing from this backup${items.length ? `: ${items.join(", ")}${n > items.length ? ", ..." : ""}` : ""}.`;
 }
 
 // Runs one part, timing it and turning unexpected errors into a failed part, so

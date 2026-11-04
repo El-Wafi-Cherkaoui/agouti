@@ -5,7 +5,8 @@ import { requireConfig } from "../config.js";
 import { runBackup } from "./backup.js";
 import { detectApp, dirStats, fileCandidates, findApps, formatBytes, suggestName } from "../detect.js";
 import { readDatabaseSettings } from "../envfile.js";
-import { backupUserSql, generatePassword, routinesWarning } from "../mysql.js";
+import { basename } from "node:path";
+import { backupUserSql, clientFlavor, generatePassword, mysqlClient, routinesWarning } from "../mysql.js";
 import { paths } from "../paths.js";
 import { discardDatabase, prepareDatabase, saveProject, validateAppDir, validateFolders, validateName } from "../projects.js";
 import { UserError, bold, dim, info, ok, red, warn, yellow } from "../ui.js";
@@ -154,9 +155,9 @@ async function backupUserSetup(ask) {
   const database = (await ask.input({ message: "Database name (the app's DB_DATABASE)", required: true })).trim();
   const password = generatePassword();
   info(`
-Run this as a MySQL admin (on most servers: ${bold("sudo mysql")}):
+Run this as a MySQL admin (on most servers: ${bold(`sudo ${basename(mysqlClient())}`)}):
 
-${backupUserSql({ database, password })}
+${backupUserSql({ database, password, flavor: await clientFlavor() })}
 
 ${dim("It can read the database (all mysqldump needs) but can't change anything.")}
 ${dim("The password was generated just now; Agouti will store it, you don't need to.")}

@@ -2,7 +2,7 @@
 // Needs internet the first time (downloads the pinned restic into test/.cache).
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { before, test } from "node:test";
@@ -78,4 +78,33 @@ test("connect reports a missing repository", async (t) => {
   const r = a.agouti("connect", join(a.root, "nothing-here"), "--recovery-key", "agouti-rk-X");
   assert.equal(r.status, 1);
   assert.match(r.stderr, /no repository at/);
+});
+
+test("add --exclude: saved tidied, a bad rule refused, and the real command backs up without them", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { agouti, env, repo, root } = await sandbox();
+  env.AGOUTI_DB_PASSWORD = "x";
+  env.AGOUTI_MYSQLDUMP = join(root, "mysqldump");
+  env.AGOUTI_MYSQL = "/nonexistent/mysql";
+  await writeFile(env.AGOUTI_MYSQLDUMP, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "mysqldump  Ver 8.4"; exit 0; fi\necho "-- dump"\n');
+  await chmod(env.AGOUTI_MYSQLDUMP, 0o755);
+  const app = join(root, "shop");
+  await mkdir(join(app, "up/thumbs"), { recursive: true });
+  await writeFile(join(app, "up/keep.pdf"), "keep");
+  await writeFile(join(app, "up/thumbs/t.jpg"), "thumb");
+  assert.equal(agouti("init", "--repo", repo).status, 0);
+  const add = (...extra) => agouti("add", app, "--db-name", "shop", "--db-user", "u", "--files", "up", "--no-check", ...extra);
+
+  const bad = add("--exclude", "up");
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /Can't exclude "up"/);
+
+  const good = add("--exclude", "thumbs, ./up/thumbs/");
+  assert.equal(good.status, 0, good.stderr);
+  assert.match(good.stdout, /Left out: thumbs, up\/thumbs/);
+  assert.match(await readFile(join(root, "etc/agouti.yml"), "utf8"), /exclude:\n\s+- thumbs\n\s+- up\/thumbs/);
+
+  const backup = agouti("backup");
+  assert.equal(backup.status, 0, backup.stdout + backup.stderr);
+  assert.match(backup.stdout, /1 file\b/);
 });

@@ -114,7 +114,7 @@ async function sandbox() {
     files: ["storage/app/public"],
   };
   await saveConfig({ repository: repo, projects: { shop: project } }, p);
-  return { root, p, env, repo };
+  return { root, p, env, repo, dir };
 }
 
 // A stand-in systemctl that logs its arguments.
@@ -320,4 +320,30 @@ test("alerts: a message saying what failed and what to do, then one when it work
 
   await captured(() => scheduledBackup([], { p }));
   assert.equal(sent().length, 2, "all good, and was good: no message");
+});
+
+test("a file that can't be read reaches the alerts, though the rest is saved", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  if (process.getuid?.() === 0) return t.skip("root can read everything");
+  const { p, dir } = await sandbox();
+  const hook = await healthcheckServer();
+  t.after(hook.close);
+  await saveCredentials({ ...(await loadCredentials(p)), AGOUTI_ALERT_WEBHOOK: hook.url.replace("/ping/abc", "/hook") }, p);
+  const locked = join(dir, "storage/app/public/locked.pdf");
+  await writeFile(locked, "secret");
+  await chmod(locked, 0o000);
+
+  let ok;
+  await captured(async () => (ok = await scheduledBackup([], { p })));
+  assert.equal(ok, false);
+  const [message] = hook.pings.map((x) => JSON.parse(x.body));
+  assert.equal(message.event, "failure");
+  assert.ok(message.lines[0].startsWith("shop: 1 file couldn't be read and is missing from this backup: "), message.lines[0]);
+  assert.ok(message.lines[0].includes("locked.pdf"));
+  assert.match(message.lines[1], /The rest was backed up/);
+
+  await chmod(locked, 0o644);
+  await captured(async () => (ok = await scheduledBackup([], { p })));
+  assert.equal(ok, true);
+  assert.equal(JSON.parse(hook.pings[1].body).event, "recovered");
 });

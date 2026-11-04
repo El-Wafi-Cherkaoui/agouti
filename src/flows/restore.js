@@ -1,6 +1,7 @@
 // Restoring, interactively ("Restore" in the app, or `sudo agouti restore`), and the
 // output shared with `agouti restore <app> ...`.
-import { relative } from "node:path";
+import { basename, relative } from "node:path";
+import { mysqlClient } from "../mysql.js";
 import { ago } from "../app.js";
 import { requireConfig } from "../config.js";
 import { formatBytes } from "../detect.js";
@@ -243,7 +244,7 @@ function nextSteps(r) {
   const lines = [];
   if (r.mode === "copy") {
     if (r.database?.ok) {
-      lines.push(`Look at the database: mysql ${r.database.database}`);
+      lines.push(`Look at the database: ${basename(mysqlClient())} ${r.database.database}`);
       lines.push(`Drop it when you're done: DROP DATABASE \`${r.database.database}\`;`);
     }
     if (r.files?.ok) lines.push(`Copy back what you need from ${r.files.path} (cp -a keeps owners), then delete it.`);

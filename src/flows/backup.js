@@ -48,7 +48,11 @@ export async function scheduledBackup(names = [], { p = paths() } = {}) {
         if (r[part].warning) report.push(`${r.app}: ${r[part].warning}`);
       }
     }
-    ok = results.every((r) => r.ok);
+    // The backup was saved, but it doesn't hold everything: that has to reach someone.
+    for (const r of results) {
+      if (r.files.unreadable) fail(`${r.app}: ${r.files.unreadable}`, "The rest was backed up. Check who can read these files, or exclude them in agouti.yml.");
+    }
+    ok = results.every((r) => r.ok && !r.files.unreadable);
 
     const config = await requireConfig(p);
     const policy = config.retention ?? DEFAULT_RETENTION;

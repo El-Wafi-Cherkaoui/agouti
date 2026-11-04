@@ -1,5 +1,7 @@
 // Talking to MySQL/MariaDB. Credentials always go through a private option file
 // (--defaults-extra-file), never the command line, where `ps` would show them.
+import { accessSync, constants } from "node:fs";
+import { delimiter, join } from "node:path";
 import { spawn } from "./children.js";
 import { randomBytes } from "node:crypto";
 import { writeAtomic } from "./config.js";
@@ -43,7 +45,7 @@ export function routinesVisible(grants, database) {
   return grants.map(parseGrant).some((g) => {
     if (!g) return false;
     const has = (...names) => names.some((n) => g.privs.includes(n));
-    if (g.db === "*") return has("ALL PRIVILEGES", "SHOW_ROUTINE", "SELECT");
+    if (g.db === "*") return has("ALL PRIVILEGES", "SHOW_ROUTINE", "SHOW CREATE ROUTINE", "SELECT");
     if (g.db === "mysql" && (g.table === "*" || g.table === "proc")) return has("ALL PRIVILEGES", "SELECT");
     return g.table === "*" && dbPatternMatches(g.db, database) && has("ALL PRIVILEGES", "ALTER ROUTINE", "CREATE ROUTINE");
   });
@@ -87,7 +89,20 @@ export function cleanError(stderr) {
 export const id = (s) => "`" + String(s).replace(/`/g, "``") + "`";
 export const str = (s) => "'" + String(s).replace(/\\/g, "\\\\").replace(/'/g, "''") + "'";
 
-export const mysqlClient = () => process.env.AGOUTI_MYSQL || "mysql";
+// Newer MariaDB packages only install mariadb and mariadb-dump, without the mysql names.
+const onPath = (name) =>
+  (process.env.PATH ?? "").split(delimiter).some((dir) => {
+    try {
+      accessSync(join(dir || ".", name), constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+const firstInstalled = (...names) => names.find(onPath) ?? names[0];
+
+export const mysqlClient = () => process.env.AGOUTI_MYSQL || firstInstalled("mysql", "mariadb");
+export const dumpClient = () => process.env.AGOUTI_MYSQLDUMP || firstInstalled("mysqldump", "mariadb-dump");
 
 // Runs SQL with the given option file. Returns { ok, rows: [[...]], error, missing }.
 export async function query(optionFile, sql, { database } = {}) {
@@ -118,14 +133,32 @@ export function generatePassword() {
 // everything mysqldump needs, but can't change or delete anything.
 // SHOW_ROUTINE lets it see stored procedures/functions; without it mysqldump
 // silently leaves them out. It's read-only too.
-export function backupUserSql({ database, username = "agouti_backup", host = "localhost", password }) {
+// flavor: which server the SQL is for (see clientFlavor). The grant that lets a
+// read-only user see stored procedures is different on each and an error on the
+// other, which would stop a pasted script halfway. Unknown: both, as comments.
+export function backupUserSql({ database, username = "agouti_backup", host = "localhost", password, flavor }) {
   const who = `${str(username)}@${str(host)}`;
   return [
     `CREATE USER ${who} IDENTIFIED BY ${str(password)};`,
     `GRANT SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT ON ${id(database)}.* TO ${who};`,
-    `GRANT SHOW_ROUTINE ON *.* TO ${who};  -- MySQL 8.0.20+`,
-    `-- On MariaDB, run this instead of the line above: GRANT SELECT ON mysql.proc TO ${who};`,
+    ...(flavor === "mariadb"
+      ? [`GRANT SELECT ON mysql.proc TO ${who};`]
+      : flavor === "mysql"
+        ? [`GRANT SHOW_ROUTINE ON *.* TO ${who};`]
+        : [
+            "-- To back up stored procedures too, also run the line for your server:",
+            `-- MySQL 8.0.20+: GRANT SHOW_ROUTINE ON *.* TO ${who};`,
+            `-- MariaDB:       GRANT SELECT ON mysql.proc TO ${who};`,
+          ]),
   ].join("\n");
+}
+
+// "mysql" or "mariadb", going by the client installed here (the same family as a
+// local server, nearly always). null when there's no client to ask.
+export async function clientFlavor() {
+  const r = await run(mysqlClient(), ["--version"]);
+  if (r.missing || r.code !== 0) return null;
+  return /mariadb/i.test(r.stdout) ? "mariadb" : "mysql";
 }
 
 function run(cmd, args) {
@@ -153,7 +186,7 @@ export function routinesWarning(username) {
 // tables (--single-transaction), streams rows instead of buffering (--quick),
 // and includes routines, triggers and events. Not compressed here: restic
 // compresses and deduplicates, which compressed input would defeat.
-export async function dumpCommand(optionFile, database, { bin = process.env.AGOUTI_MYSQLDUMP || "mysqldump" } = {}) {
+export async function dumpCommand(optionFile, database, { bin = dumpClient() } = {}) {
   const r = await run(bin, ["--version"]);
   if (r.missing)
     throw new UserError("mysqldump isn't installed.", "Install it (e.g. `apt install mysql-client` or `apt install mariadb-client`) and try again.");

@@ -1,13 +1,44 @@
 import assert from "node:assert/strict";
+import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { detectApp, dirStats, fileCandidates, formatBytes, suggestName } from "../src/detect.js";
 import { databaseSettingsFrom } from "../src/envfile.js";
-import { backupUserSql, optionFileContent } from "../src/mysql.js";
+import { backupUserSql, clientFlavor, dumpClient, mysqlClient, optionFileContent } from "../src/mysql.js";
 import { validateFolders } from "../src/projects.js";
 import { UserError } from "../src/ui.js";
 import { ENV, laravelFixture } from "./helpers.js";
+
+test("backup user SQL: only the grant the server accepts, so a pasted script runs to the end", () => {
+  const who = "'agouti_backup'@'localhost'";
+  const statements = (flavor) => backupUserSql({ database: "d", password: "p", flavor }).split("\n").filter((l) => !l.startsWith("--")).join("\n");
+  assert.ok(statements("mariadb").includes(`GRANT SELECT ON mysql.proc TO ${who};`));
+  assert.ok(!statements("mariadb").includes("SHOW_ROUTINE"));
+  assert.ok(statements("mysql").includes(`GRANT SHOW_ROUTINE ON *.* TO ${who};`));
+  assert.ok(!statements("mysql").includes("mysql.proc"));
+  assert.ok(!statements(null).includes("SHOW_ROUTINE") && !statements(null).includes("mysql.proc"));
+  assert.match(backupUserSql({ database: "d", password: "p", flavor: null }), /MariaDB: +GRANT SELECT ON mysql.proc/);
+});
+
+test("a server with only MariaDB's client names is still usable", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agouti-clients-"));
+  for (const name of ["mariadb", "mariadb-dump"]) {
+    await writeFile(join(dir, name), "#!/bin/sh\necho 'mariadb from 11.4.5-MariaDB'\n");
+    await chmod(join(dir, name), 0o755);
+  }
+  const saved = { PATH: process.env.PATH, AGOUTI_MYSQL: process.env.AGOUTI_MYSQL, AGOUTI_MYSQLDUMP: process.env.AGOUTI_MYSQLDUMP };
+  delete process.env.AGOUTI_MYSQL;
+  delete process.env.AGOUTI_MYSQLDUMP;
+  process.env.PATH = dir;
+  try {
+    assert.equal(mysqlClient(), "mariadb");
+    assert.equal(dumpClient(), "mariadb-dump");
+    assert.equal(await clientFlavor(), "mariadb");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+});
 
 test(".env: only database settings come out, other secrets never do", () => {
   const s = databaseSettingsFrom(ENV);

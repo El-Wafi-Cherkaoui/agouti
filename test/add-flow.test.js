@@ -115,7 +115,7 @@ test("read-only backup user: SQL shown, failed connection fixed in place", async
   const flaky = join(await mkdtemp(join(tmpdir(), "agouti-flaky-")), "mysql");
   await writeFile(
     flaky,
-    `#!/bin/sh\nif [ ! -f "${flaky}.ran" ]; then touch "${flaky}.ran"; echo "ERROR 1045 (28000): Access denied" >&2; exit 1; fi\nexec "${orig}" "$@"\n`,
+    `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "mysql  Ver 8.4"; exit 0; fi\nif [ ! -f "${flaky}.ran" ]; then touch "${flaky}.ran"; echo "ERROR 1045 (28000): Access denied" >&2; exit 1; fi\nexec "${orig}" "$@"\n`,
   );
   await chmod(flaky, 0o755);
   process.env.AGOUTI_MYSQL = flaky;
