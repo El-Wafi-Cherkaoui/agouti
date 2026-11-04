@@ -5,6 +5,7 @@
 //   replace  the live database and folders are replaced. A safety restore point
 //            of the current state is made first, so a replace can be undone.
 // No printing here: progress and results go to onEvent.
+import { restoreExcludes } from "./excludes.js";
 import { shield, stopAll } from "./children.js";
 import { loadDump } from "./dump.js";
 import { existsSync, rmSync } from "node:fs";
@@ -32,7 +33,7 @@ export async function listPoints(app, { bin, env }) {
     if (s.time < pt.at) pt.at = s.time;
     const sum = s.summary ?? {};
     if (tag("part") === "database") pt.database = { snapshot: s.id, path: s.paths[0], bytes: sum.total_bytes_processed };
-    if (tag("part") === "files") pt.files = { snapshot: s.id, paths: s.paths, files: sum.total_files_processed, bytes: sum.total_bytes_processed };
+    if (tag("part") === "files") pt.files = { snapshot: s.id, paths: s.paths, excludes: s.excludes ?? [], files: sum.total_files_processed, bytes: sum.total_bytes_processed };
     points.set(point, pt);
   }
   return [...points.values()].sort((a, b) => b.id.localeCompare(a.id));
@@ -361,11 +362,12 @@ async function restoreFiles(point, project, { bin, env, mode, origin, target, on
   for (const folder of folders) {
     // Copy: keep the layout relative to the app (restores/shop-<point>/storage/app/public).
     // Replace: each backed-up folder in place. --delete is scoped to that folder,
-    // never to the whole app (which would delete the code).
+    // never to the whole app (which would delete the code), and skips what this
+    // backup left out on purpose (it isn't in the snapshot, but must not be deleted).
     const rel = relative(origin, folder);
     const dest = mode === "copy" ? join(target, rel.startsWith("..") ? folder.replace(/^\/+/, "") : rel) : destination(folder, origin, project.path);
     await mkdir(dest, { recursive: true });
-    const args = ["restore", `${point.files.snapshot}:${folder}`, "--target", dest, ...(mode === "replace" ? ["--delete"] : [])];
+    const args = ["restore", `${point.files.snapshot}:${folder}`, "--target", dest, ...(mode === "replace" ? ["--delete", ...restoreExcludes(point.files.excludes, folder).flatMap((x) => ["--exclude", x])] : [])];
     const r = await runJson(bin, args, {
       env,
       onMessage: (m) => {

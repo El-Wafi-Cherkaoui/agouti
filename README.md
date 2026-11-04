@@ -263,7 +263,9 @@ projects:
     files:
       - storage/app/public
       - storage/app/private
-    exclude: [storage/app/public/thumbs]
+    exclude:                                   # left out of the backups
+      - storage/app/public/thumbs              # a path inside one of the folders above
+      - "*.tmp"                                # or a name, anywhere inside them
     verify:
       references: "SELECT path FROM media"   # check every referenced file is in the backup
 
@@ -272,6 +274,12 @@ retention: { daily: 7, weekly: 4, monthly: 12 }
 repository: s3:https://<id>.r2.cloudflarestorage.com/backups
 # The healthcheck URL and storage keys live in credentials.env (root-only).
 ```
+
+**Excluding files.** A rule with a `/` is a path from the app's folder and can use `*` and `?`. A rule without one is a name that matches anywhere in the backed-up folders. Set rules here, or with `agouti add --exclude thumbs,storage/app/public/tmp`.
+
+A rule that can't be applied (a path outside the backed-up folders, or one that would leave out a whole folder) is ignored with a warning, so a typo can't shrink your backup. If the rules leave out every file, the backup counts as failed and you get an alert.
+
+Excluded files can't be restored, but they're also safe from a restore: **Replace** leaves the files a restore point excluded exactly as they are.
 
 ## Protect backups from attackers
 

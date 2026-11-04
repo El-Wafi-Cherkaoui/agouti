@@ -7,6 +7,7 @@ import { stat } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { requireConfig } from "./config.js";
+import { excludePatterns } from "./excludes.js";
 import { dumpCommand } from "./mysql.js";
 import { paths } from "./paths.js";
 import { EXIT, ensureRestic, resticEnv, run, runJson } from "./restic.js";
@@ -50,6 +51,7 @@ export function appDescription(name, project) {
     ...(project.framework ? { framework: project.framework } : {}),
     database: { engine: db.engine ?? "mysql", name: db.name, ...(db.socket ? { socket: db.socket } : { host: db.host, port: db.port }), user: db.user },
     files: project.files ?? [],
+    ...(project.exclude?.length ? { exclude: project.exclude } : {}),
   };
 }
 
@@ -95,10 +97,21 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [] }) {
     for (const d of dirs) if (!(await stat(d).catch(() => null))?.isDirectory()) missing.push(d);
     if (missing.length) return { ok: false, error: `Folder missing: ${missing.join(", ")}. Was it moved or deleted?` };
 
-    const r = await runJson(bin, [...common, "--tag", [...tags, "part=files"].join(","), ...dirs], { env, onMessage: progress });
+    const { patterns, ignored } = excludePatterns(project);
+    const r = await runJson(bin, [...common, "--tag", [...tags, "part=files"].join(","), ...patterns.flatMap((x) => ["--exclude", x]), ...dirs], {
+      env,
+      onMessage: progress,
+    });
     // Exit 3: snapshot saved, but some files couldn't be read (permissions, vanished mid-backup).
     if ((r.code !== EXIT.OK && r.code !== 3) || !r.summary) return { ok: false, error: describeFailure(r, "restic") };
+    if (patterns.length && r.summary.total_files_processed === 0) {
+      return { ok: false, error: "The exclude rules left out every file, so no files were saved.", hint: `Check exclude for ${name} in agouti.yml: ${patterns.join(", ")}` };
+    }
     const unreadable = r.messages.filter((m) => m.message_type === "error").length;
+    const warnings = [
+      ...(unreadable ? [`${unreadable} ${unreadable === 1 ? "file" : "files"} couldn't be read and ${unreadable === 1 ? "is" : "are"} missing from this backup.`] : []),
+      ...ignored.map((x) => `Exclude rule ignored, so these files were backed up: ${x}.`),
+    ];
     return {
       ok: true,
       snapshot: r.summary.snapshot_id,
@@ -107,9 +120,7 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [] }) {
       added: r.summary.data_added,
       newFiles: r.summary.files_new,
       changed: r.summary.files_changed,
-      ...(unreadable
-        ? { warning: `${unreadable} ${unreadable === 1 ? "file" : "files"} couldn't be read and ${unreadable === 1 ? "is" : "are"} missing from this backup.` }
-        : {}),
+      ...(warnings.length ? { warning: warnings.join(" ") } : {}),
     };
   });
 

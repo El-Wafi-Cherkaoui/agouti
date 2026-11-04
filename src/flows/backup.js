@@ -45,6 +45,7 @@ export async function scheduledBackup(names = [], { p = paths() } = {}) {
       report.push(r.ok ? `${r.app}: ok` : `${r.app}: FAILED ${failureText(r)}`);
       for (const part of ["database", "files"]) {
         if (!r[part].ok) fail(`${r.app}: the ${part} wasn't backed up: ${r[part].error}`, r[part].hint);
+        if (r[part].warning) report.push(`${r.app}: ${r[part].warning}`);
       }
     }
     ok = results.every((r) => r.ok);

@@ -65,7 +65,7 @@ export async function discardDatabase(name, p = paths()) {
 }
 
 // Saves the app to agouti.yml. The password stays in the option file only.
-export async function saveProject({ name, dir, framework, db, source, files }, p = paths()) {
+export async function saveProject({ name, dir, framework, db, source, files, exclude }, p = paths()) {
   const config = await requireConfig(p);
   const valid = validateName(name, config);
   if (valid !== true) throw new UserError(valid);
@@ -81,6 +81,7 @@ export async function saveProject({ name, dir, framework, db, source, files }, p
       source,
     },
     files,
+    ...(exclude?.length ? { exclude } : {}),
   };
   await saveConfig(config, p);
   return config.projects[name];

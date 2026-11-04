@@ -1,4 +1,5 @@
 import { requireConfig } from "../config.js";
+import { validateExcludes } from "../excludes.js";
 import { detectApp, fileCandidates, formatBytes, suggestName } from "../detect.js";
 import { readDatabaseSettings } from "../envfile.js";
 import { routinesWarning } from "../mysql.js";
@@ -25,6 +26,8 @@ Options:
   --name <name>        Name for the app (default: the directory name)
   --files <a,b>        Folders to back up, relative to the app
                        (default: the detected upload folders)
+  --exclude <a,b>      Leave these out of the backups: names anywhere in those
+                       folders ("thumbs", "*.tmp"), or paths relative to the app
   --no-check           Save even if the database connection fails`;
 
 export const options = {
@@ -35,6 +38,7 @@ export const options = {
   "db-port": { type: "string" },
   "db-user": { type: "string" },
   files: { type: "string" },
+  exclude: { type: "string" },
   "no-check": { type: "boolean" },
 };
 
@@ -79,6 +83,7 @@ export async function add({ values, positionals }) {
   const files = values.files
     ? await validateFolders(appDir, values.files.split(","))
     : (await fileCandidates(appDir, app.framework)).filter((c) => c.include).map((c) => c.path);
+  const exclude = validateExcludes((values.exclude ?? "").split(","), files);
 
   try {
     const { check } = await prepareDatabase(name, db, p);
@@ -89,11 +94,12 @@ export async function add({ values, positionals }) {
     else if (values["no-check"]) warn(`Couldn't connect: ${check.message} (saved anyway, --no-check)`);
     else throw new UserError(`Couldn't connect to the database: ${check.message}`, "Fix the details, or pass --no-check to save anyway.");
 
-    await saveProject({ name, dir: appDir, framework: app.framework, db, source: values["read-env"] ? "env" : "manual", files }, p);
+    await saveProject({ name, dir: appDir, framework: app.framework, db, source: values["read-env"] ? "env" : "manual", files, exclude }, p);
   } catch (err) {
     await discardDatabase(name, p);
     throw err;
   }
   ok(`Added ${bold(name)} (${app.label})`);
   info(`  Files: ${files.length ? files.join(", ") : "none (database only)"}`);
+  if (exclude.length) info(`  Left out: ${exclude.join(", ")}`);
 }

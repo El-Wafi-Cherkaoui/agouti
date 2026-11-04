@@ -131,7 +131,7 @@ async function setUp(name, { dir, d, project, admin, p }) {
   const db = { host: project.database.host, port: project.database.port, database: project.database.name, username: user.username, password: user.password };
   const { check } = await prepareDatabase(name, db, p);
   if (!check.ok) throw new UserError(`The new backup user can't connect: ${check.message}`);
-  await saveProject({ name, dir, framework: d.framework, db, source: "restored", files: d.files }, p);
+  await saveProject({ name, dir, framework: d.framework, db, source: "restored", files: d.files, exclude: d.exclude }, p);
   ok(`${bold(name)} is set up on this server (backup user ${user.username}, read-only).`);
   if (!user.routines) warn("The backup user can't see stored procedures, so backups would leave them out. Grant SHOW_ROUTINE if you use any.");
 }
