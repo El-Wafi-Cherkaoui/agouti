@@ -80,6 +80,12 @@ test("ISO weeks across a year boundary", () => {
   assert.equal(weekKey(new Date("2024-12-30T12:00Z")), "2025-W1");
 });
 
+test("the service waits for the database, for the catch-up run at boot", () => {
+  const { service, timer } = unitFiles("03:00", { command: ["/usr/bin/node", "/opt/agouti.js"], env: {} });
+  assert.match(service, /^After=.*\bmysql\.service\b.*\bmariadb\.service\b/m);
+  assert.match(timer, /^Persistent=true$/m);
+});
+
 test("times, unit files and the healthcheck URL", () => {
   assert.equal(parseTime("3:05"), "03:05");
   assert.equal(parseTime(" 23:59 "), "23:59");

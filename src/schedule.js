@@ -55,7 +55,8 @@ export function unitFiles(time, { command = agoutiCommand(), env = process.env }
 [Unit]
 Description=Agouti: back up apps (database + files)
 Wants=network-online.target
-After=network-online.target
+# A backup missed while the server was off runs at boot: not before the database is up.
+After=network-online.target mysql.service mariadb.service mysqld.service
 
 [Service]
 Type=oneshot
