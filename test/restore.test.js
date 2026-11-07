@@ -12,6 +12,7 @@ import { backupApps } from "../src/backup.js";
 import { loadConfig, saveConfig, saveRecoveryKey } from "../src/config.js";
 import { paths } from "../src/paths.js";
 import { restoreFlow } from "../src/flows/restore.js";
+import { dumpFilter } from "../src/dump.js";
 import { applyRetention } from "../src/retention.js";
 import { copyDatabaseName, discoverApps, listPoints, restoreApp, restoreFilesByPath } from "../src/restore.js";
 import { ensureRestic, resticEnv } from "../src/restic.js";
@@ -108,6 +109,7 @@ test("replace: saves the current state first, then makes the backed-up folders i
   const r = await restoreApp({ app: "shop", mode: "replace" }, { p });
   assert.equal(r.ok, true);
   assert.equal(await liveSql(), DUMP, "live database replaced");
+  assert.deepEqual(await scratchDatabases(), [], "no throwaway database left");
   assert.equal((await readFile(join(dir, "storage/app/private/invoices/88.pdf"))).length, 500, "deleted file is back");
   assert.equal(existsSync(join(dir, "storage/app/public/stray.txt")), false, "files added since are removed");
   assert.match(await readFile(join(dir, "app.php"), "utf8"), /never touched/, "the app's code is outside the restored folders");
@@ -130,6 +132,75 @@ test("replace stops before touching anything if the current state can't be saved
   await rm(join(dir, "storage/app/public"), { recursive: true }); // backup of files will fail: folder missing
   await assert.rejects(restoreApp({ app: "shop", mode: "replace" }, { p }), /Couldn't save the current files first, so nothing was replaced/);
   assert.equal(await liveSql(), "CREATE TABLE `live` (id int);\n");
+});
+
+// Damages a data file on the "drive", the way a bad spot would: restic notices when it reads it.
+async function damage(file) {
+  await chmod(file, 0o644);
+  const bytes = await readFile(file);
+  for (let i = 0; i < 16; i++) bytes[i] ^= 0xff;
+  await writeFile(file, bytes);
+}
+
+async function dataFiles(repo) {
+  const entries = await readdir(join(repo, "data"), { recursive: true, withFileTypes: true });
+  return entries.filter((e) => e.isFile()).map((e) => join(e.parentPath, e.name));
+}
+
+const scratchDatabases = () => readdir(dbDir).then((names) => names.filter((n) => n.includes("agouti_check")));
+
+test("replace from a damaged backup: the live database is untouched, and the real cause is named", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p, config } = await setup();
+  for (const f of await dataFiles(config.repository)) await damage(f);
+  const before = (await listPoints("shop", { bin: restic, env: await resticEnv(config, p) })).length;
+
+  await assert.rejects(restoreApp({ app: "shop", mode: "replace" }, { p }), (err) => {
+    assert.match(err.message, /nothing was replaced/i);
+    assert.match(err.message, /Reading the backup failed/);
+    assert.doesNotMatch(err.message, /SQL syntax/);
+    return true;
+  });
+  assert.equal(await liveSql(), "CREATE TABLE `live` (id int);\n", "live database untouched");
+  assert.deepEqual(await scratchDatabases(), [], "no throwaway database left");
+  const after = (await listPoints("shop", { bin: restic, env: await resticEnv(config, p) })).length;
+  assert.equal(after, before, "no safety point of a state nothing changed");
+});
+
+test("replace with a dump the server can't load: the live database is untouched", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p } = await setup();
+  process.env.FAKE_LOAD_FAIL = "1";
+  try {
+    await assert.rejects(restoreApp({ app: "shop", mode: "replace" }, { p }), /nothing was replaced.*Loading the dump failed/is);
+  } finally {
+    delete process.env.FAKE_LOAD_FAIL;
+  }
+  assert.equal(await liveSql(), "CREATE TABLE `live` (id int);\n");
+  assert.deepEqual(await scratchDatabases(), []);
+});
+
+test("replace stops when the safety point can't be read back, because undo wouldn't work", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { root, p, config, point } = await setup();
+
+  // A second backup with a different database. Damage its data: the first point stays
+  // healthy, but saving this same database again re-uses the damaged data.
+  const newer = join(root, "newer.sql");
+  await writeFile(newer, `CREATE TABLE \`newer\` (id int);\nINSERT INTO \`newer\` VALUES ${Array.from({ length: 40000 }, (_, i) => `(${i * 7919})`).join(",")};\n`);
+  process.env.FAKE_DUMP = newer;
+  try {
+    const known = new Set(await dataFiles(config.repository));
+    await backupApps([], { p });
+    const added = (await dataFiles(config.repository)).filter((f) => !known.has(f));
+    const sizes = await Promise.all(added.map(async (f) => [(await stat(f)).size, f]));
+    await damage(sizes.sort((a, b) => b[0] - a[0])[0][1]); // the biggest: the dump, not the folder listing
+
+    await assert.rejects(restoreApp({ app: "shop", point, mode: "replace" }, { p }), /can't be read back.*nothing was replaced/is);
+  } finally {
+    delete process.env.FAKE_DUMP;
+  }
+  assert.equal(await liveSql(), "CREATE TABLE `live` (id int);\n", "live database untouched");
 });
 
 test("no admin connection: fails before any work, and leaves no password file", async (t) => {
@@ -305,6 +376,88 @@ test("new server: never overwrites what's already there", async (t) => {
   assert.equal(existsSync(join(dbDir, "shop_other")), false, "checked before any work");
 });
 
+// Point ids have one-second resolution: two points in the same second would merge.
+const nextSecond = () => new Promise((r) => setTimeout(r, 1100));
+
+// The old server's history: a good backup, a replace (its safety point), then a
+// backup whose database failed. Newest first: incomplete, safety, good.
+async function messyHistory() {
+  const old = await setup();
+  await nextSecond();
+  const r = await restoreApp({ app: "shop", mode: "replace" }, { p: old.p });
+  await nextSecond();
+  process.env.FAKE_DUMP = join(old.root, "no-such-dump.sql"); // mysqldump fails
+  try {
+    const [bad] = await backupApps(["shop"], { p: old.p });
+    assert.equal(bad.ok, false);
+  } finally {
+    delete process.env.FAKE_DUMP;
+  }
+  const points = await listPoints("shop", { bin: restic, env: await resticEnv(old.config, old.p) });
+  assert.deepEqual(
+    points.map((pt) => [!!pt.database, !!pt.files, pt.safety]),
+    [[false, true, false], [true, true, true], [true, true, false]],
+  );
+  return { old, good: old.point, safety: r.safety.point, incomplete: points[0].id };
+}
+
+test("latest means the newest real backup with the parts asked for: not a safety point, not an incomplete one", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { old, good, incomplete } = await messyHistory();
+  const both = await restoreApp({ app: "shop", point: "latest", mode: "copy" }, { p: old.p });
+  assert.equal(both.point, good, "the incomplete point and the safety point are passed over");
+  const files = await restoreApp({ app: "shop", point: "latest", parts: ["files"], mode: "copy" }, { p: old.p });
+  assert.equal(files.point, incomplete, "for files alone, the newest point that has them");
+  const [single] = await restoreFilesByPath("shop", "latest", [join(old.dir, "storage/app/private/invoices/88.pdf")], { p: old.p });
+  assert.ok(single.includes(`shop-${incomplete}`), "a single file: from the newest point that has files");
+});
+
+test("new server: suggests the newest complete backup, and can't pick an incomplete point", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { old, good, safety, incomplete } = await messyHistory();
+  const { root, p } = await newServer(old);
+  const dir = join(root, "srv/shop");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "artisan"), "");
+
+  const ask = scripted([
+    [
+      "select",
+      /Which restore point/,
+      (o) => {
+        assert.equal(o.default.id, good);
+        const choice = (id) => o.choices.find((c) => c.value.id === id);
+        assert.match(choice(incomplete).disabled, /no database/);
+        assert.equal(choice(good).disabled, false);
+        assert.match(choice(good).name, /latest/);
+        assert.match(choice(safety).name, /saved before a restore/);
+        assert.doesNotMatch(choice(safety).name, /latest/);
+        return o.default;
+      },
+    ],
+    ["input", /Where should shop go/, dir],
+    ["input", /Database name/, "shop_new"],
+    ["confirm", /Go ahead/, true],
+    ["confirm", /Keep backing up shop/, false],
+  ]);
+  const out = await captured(() => restoreFlow(ask, { p }));
+  assert.deepEqual(ask.remaining, []);
+  assert.match(out, /The newest restore point isn't a complete backup/);
+  assert.match(out, new RegExp(`restore shop as it was on`));
+  assert.match(out, /✓ database  restored into shop_new/);
+  assert.equal((await readFile(join(dir, "storage/app/private/invoices/88.pdf"))).length, 500);
+});
+
+test("new server: when no backup is complete, says so instead of failing halfway", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const old = await setup();
+  const env = await resticEnv(old.config, old.p);
+  const [db] = JSON.parse(spawnSync(restic, ["snapshots", "--json", "--tag", "part=database"], { env, encoding: "utf8" }).stdout);
+  spawnSync(restic, ["forget", db.id], { env });
+  const { p } = await newServer(old);
+  await assert.rejects(restoreFlow(scripted([]), { p }), /No backup of shop has database and files/);
+});
+
 test("agouti connect lists the apps found in the backups", async (t) => {
   if (!restic) return t.skip("restic unavailable");
   const old = await setup();
@@ -314,4 +467,27 @@ test("agouti connect lists the apps found in the backups", async (t) => {
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /Found 1 app in the backups:\n  shop .* database shop_prod · last backup just now/);
   assert.match(r.stdout, /sudo agouti → Restore/);
+});
+
+test("a throwaway database never gets the dump's events, in the form mysqldump writes them", async () => {
+  const lines = [
+    "CREATE TABLE `a` (id int);",
+    "DELIMITER ;;",
+    "/*!50003 SET time_zone = 'SYSTEM' */ ;;",
+    "/*!50106 CREATE*/ /*!50117 DEFINER=`root`@`localhost`*/ /*!50106 EVENT `purge` ON SCHEDULE EVERY 1 DAY DO",
+    "DELETE FROM live_db.logs */ ;;",
+    "/*!50003 SET time_zone = @saved_time_zone */ ;;",
+    "DELIMITER ;",
+  ];
+  const run = (filter) => lines.map((l) => filter.line(l)).join("");
+
+  const kept = dumpFilter();
+  assert.match(run(kept), /EVENT `purge`/);
+  assert.equal(kept.stats.events, 1);
+
+  const skipped = dumpFilter({ skipEvents: true });
+  const out = run(skipped);
+  assert.doesNotMatch(out, /EVENT `purge`|live_db/);
+  assert.match(out, /SET time_zone = @saved_time_zone/, "the rest of the block stays");
+  assert.deepEqual([skipped.stats.events, skipped.stats.skipped.events], [1, 1]);
 });

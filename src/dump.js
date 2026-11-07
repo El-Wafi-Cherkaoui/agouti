@@ -10,7 +10,9 @@ import { UserError } from "./ui.js";
 // removed (only SUPER may name another user as definer), and with skipBinlogged,
 // triggers and stored functions are left out: with binary logging on, MySQL
 // refuses them to anyone without SUPER. They're still counted.
-export function dumpFilter({ restricted = false, skipBinlogged = false } = {}) {
+// skipEvents: for a throwaway database. Its events must never run: one that names
+// the live database would change it. They're still counted.
+export function dumpFilter({ restricted = false, skipBinlogged = false, skipEvents = false } = {}) {
   const stats = { tables: 0, views: 0, triggers: 0, functions: 0, procedures: 0, events: 0, skipped: { triggers: 0, functions: 0 } };
   let inBlock = false;
   let statement = [];
@@ -19,6 +21,7 @@ export function dumpFilter({ restricted = false, skipBinlogged = false } = {}) {
 
   const kind = (text) => {
     if (/^\/\*!50003 CREATE\*\/.*?\/\*!50003 TRIGGER /s.test(text)) return "triggers";
+    if (/^\/\*!\d+ CREATE\*\/.*?\/\*!\d+ EVENT /s.test(text)) return "events"; // how mysqldump writes them
     const m = text.match(/^CREATE\s+(?:DEFINER=\S+\s+)?(FUNCTION|PROCEDURE|EVENT)\s/i);
     return m ? { FUNCTION: "functions", PROCEDURE: "procedures", EVENT: "events" }[m[1].toUpperCase()] : null;
   };
@@ -43,6 +46,10 @@ export function dumpFilter({ restricted = false, skipBinlogged = false } = {}) {
     if (k) stats[k]++;
     if (skipBinlogged && (k === "triggers" || k === "functions")) {
       stats.skipped[k]++;
+      return "";
+    }
+    if (skipEvents && k === "events") {
+      stats.skipped.events = (stats.skipped.events ?? 0) + 1;
       return "";
     }
     return fix(text) + "\n";
@@ -91,10 +98,14 @@ export function loadDump(part, database, { bin, env, optionFile, onEvent = () =>
     let pending = 2;
     let dumpCode;
     let mysqlCode;
+    let stoppedDump = false;
     const done = () => {
       if (--pending) return;
+      // A read that fails cuts the dump off mid-statement, and mysql then complains about
+      // the SQL. So look at restic first, unless it only stopped because mysql had quit.
+      const dumpGaveUp = dumpCode !== 0 && !(stoppedDump && (dumpCode === null || dumpCode === 130));
+      if (dumpGaveUp) return reject(unreadable(dumpErr, dumpCode));
       if (mysqlCode !== 0) return reject(new UserError(`Loading the dump failed: ${cleanError(mysqlErr) || `exit code ${mysqlCode}`}`));
-      if (dumpCode !== 0) return reject(new UserError(`Reading the backup failed: ${lastError(dumpErr) || `exit code ${dumpCode}`}`));
       resolve({ ...filter.stats, bytes });
     };
     dump.on("error", reject);
@@ -102,9 +113,28 @@ export function loadDump(part, database, { bin, env, optionFile, onEvent = () =>
     dump.on("close", (code) => ((dumpCode = code), done()));
     mysql.on("close", (code) => {
       mysqlCode = code;
-      if (code !== 0) dump.kill(); // nothing more will be read
+      if (code !== 0) {
+        stoppedDump = true;
+        dump.kill(); // nothing more will be read
+      }
       done();
     });
+  });
+}
+
+function unreadable(stderr, code) {
+  return new UserError(`Reading the backup failed: ${lastError(stderr) || `exit code ${code}`}`, "The backup storage may be damaged. Try another restore point, and check the drive or storage.");
+}
+
+// Reads one database part all the way through without keeping it: restic checks
+// each piece as it reads, so a damaged backup fails here.
+export function readDump(part, { bin, env }) {
+  return new Promise((resolve, reject) => {
+    const dump = spawn(bin, ["dump", part.snapshot, part.path], { env, stdio: ["ignore", "ignore", "pipe"] });
+    let err = "";
+    dump.stderr.on("data", (d) => (err += d));
+    dump.on("error", reject);
+    dump.on("close", (code) => (code === 0 ? resolve() : reject(unreadable(err, code))));
   });
 }
 

@@ -6,7 +6,7 @@ import { ago } from "../app.js";
 import { requireConfig } from "../config.js";
 import { formatBytes } from "../detect.js";
 import { paths } from "../paths.js";
-import { adminConnection, copyDatabaseName, discoverApps, findFiles, listPoints, restoreApp, restoreFilesByPath } from "../restore.js";
+import { adminConnection, copyDatabaseName, discoverApps, findFiles, listPoints, newestBackup, restoreApp, restoreFilesByPath } from "../restore.js";
 import { bringBack, describeFound } from "./adopt.js";
 import { ensureRestic, resticEnv } from "../restic.js";
 import { UserError, bold, dim, green, info, red, warn, yellow } from "../ui.js";
@@ -35,10 +35,12 @@ export async function restoreFlow(ask, { p = paths(), app } = {}) {
   const points = await listPoints(app, { bin, env });
   if (!points.length) throw new UserError(`${app} has no restore points yet.`, `Make one first: "Back up now", or sudo agouti backup ${app}`);
 
+  const newest = newestBackup(points);
   const point = await ask.select({
     message: "Which restore point?",
     pageSize: 12,
-    choices: points.map((pt, i) => ({ value: pt, name: pointLabel(pt, i === 0), description: pointDetails(pt) })),
+    default: newest,
+    choices: points.map((pt) => ({ value: pt, name: pointLabel(pt, pt === newest), description: pointDetails(pt) })),
   });
 
   const what = await ask.select({
@@ -86,7 +88,7 @@ export function pointLabel(pt, latest = false) {
   return `${when}  ${dim(ago(pt.at).padEnd(11))} ${parts}${notes.length ? dim(`  (${notes.join(", ")})`) : ""}`;
 }
 
-function pointDetails(pt) {
+export function pointDetails(pt) {
   const bits = [];
   if (pt.database) bits.push(`database dump ${formatBytes(pt.database.bytes ?? 0)}`);
   else bits.push("the database part of this backup failed");
@@ -101,7 +103,7 @@ ${yellow("⚠")} ${bold("This replaces live data")} with the state of ${point.at
 ${parts.includes("database") ? `  · database ${bold(project.database.name)}: dropped and recreated from the backup. Changes made since are lost.\n` : ""}${
     parts.includes("files") ? `  · ${project.files.map((f) => bold(f)).join(", ")}: made identical to the backup. Files added since are deleted.\n` : ""
   }
-Before that, Agouti makes a restore point of the current state, so this can be undone.
+${parts.includes("database") ? "Agouti first tries this backup in a throwaway database, and stops if it doesn't load.\n" : ""}Before replacing, it makes a restore point of the current state, so this can be undone.
 Put the app in maintenance mode first if it's live (Laravel: php artisan down).
 `);
   const typed = await ask.input({ message: `Type ${bold(app)} to confirm (anything else cancels)` });
@@ -185,6 +187,12 @@ export async function runRestore(opts, { p = paths(), live = process.stdout.isTT
     p,
     log: info,
     onEvent: (e) => {
+      if (e.type === "check-start") info(dim("Trying this backup in a throwaway database first, so nothing live is at risk..."));
+      if (e.type === "check-failed") clear();
+      if (e.type === "check-done") {
+        clear();
+        info(`${green("✓")} The backup loads correctly`);
+      }
       if (e.type === "safety-start") info(dim("Saving the current state first, so this can be undone..."));
       if (e.type === "safety-done") {
         const r = e.result;

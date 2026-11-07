@@ -8,11 +8,11 @@ import { requireConfig } from "../config.js";
 import { createBackupUser } from "../mysql.js";
 import { paths } from "../paths.js";
 import { prepareDatabase, saveProject } from "../projects.js";
-import { adminConnection, discoverApps } from "../restore.js";
+import { adminConnection, discoverApps, listPoints, newestBackup } from "../restore.js";
 import { ensureRestic, resticEnv } from "../restic.js";
 import { scheduledTime } from "../schedule.js";
 import { UserError, bold, dim, info, ok, red, warn } from "../ui.js";
-import { askAdmin, runRestore } from "./restore.js";
+import { askAdmin, pointDetails, pointLabel, runRestore } from "./restore.js";
 import { scheduleFlow } from "./schedule.js";
 
 // Apps in the backups that aren't set up on this server.
@@ -57,6 +57,11 @@ export async function bringBack(ask, found, { p = paths() } = {}) {
   info(`\n${bold(found.name)}: last backed up ${ago(found.at)} on ${found.host}`);
   if (d.guessed) warn("These backups predate app descriptions: the folder and database below are Agouti's best guess. Check them.");
 
+  // A new server needs both parts. By default the newest real backup that has them:
+  // not one saved before a restore, and not one cut short by a failure.
+  const parts = d.files?.length ? ["database", "files"] : ["database"];
+  const point = await choosePoint(ask, found.name, parts, p);
+
   const dir = (
     await ask.input({
       message: `Where should ${found.name} go on this server?`,
@@ -94,13 +99,13 @@ ${dim("Deploying first is easier: `git clone` refuses a folder that isn't empty.
   if (admin.host) Object.assign(project.database, { host: admin.host, port: admin.port });
 
   info(`
-Agouti will restore the latest backup of ${bold(found.name)}:
+Agouti will restore ${bold(found.name)} as it was on ${bold(when(point))}:
   · database ${bold(dbName)} on this server (created if needed; must be empty)
   · ${d.files.map((f) => bold(join(dir, f))).join(", ") || "no folders"} (must be empty)
 `);
   if (!(await ask.confirm({ message: "Go ahead?", default: true }))) return info("Nothing was changed.");
 
-  const result = await runRestore({ app: found.name, mode: "new", project, origin: d.path, admin, point: "latest" }, { p });
+  const result = await runRestore({ app: found.name, mode: "new", project, origin: d.path, admin, point: point.id, parts }, { p });
   if (!result.ok) return;
 
   if (await ask.confirm({ message: `Keep backing up ${found.name} on this server? (creates a read-only MySQL user for it)`, default: true })) {
@@ -116,6 +121,34 @@ Agouti will restore the latest backup of ${bold(found.name)}:
     "Point the domain at this server.",
   ];
   info(dim(`\nNext:\n${steps.map((x, i) => `  ${i + 1}. ${x}`).join("\n")}`));
+}
+
+const when = (pt) => `${pt.at.replace("T", " ").slice(0, 16)} UTC`;
+
+// Asked only when there's a choice. Incomplete points are listed but can't be picked.
+async function choosePoint(ask, app, parts, p) {
+  const config = await requireConfig(p);
+  const points = await listPoints(app, { bin: await ensureRestic({ p, log: info }), env: await resticEnv(config, p) });
+  const best = newestBackup(points, parts);
+  if (!best) {
+    throw new UserError(
+      `No backup of ${app} has ${parts.join(" and ")}: each one is incomplete or was saved before a restore.`,
+      "Check the backups on the old server, if it still runs, or restore a part by hand.",
+    );
+  }
+  if (points.length === 1) return best;
+  if (best !== points[0]) info(dim(`The newest restore point isn't a complete backup, so ${when(best)} is suggested.`));
+  return ask.select({
+    message: "Which restore point?",
+    pageSize: 12,
+    default: best,
+    choices: points.map((pt) => ({
+      value: pt,
+      name: pointLabel(pt, pt === best),
+      description: pointDetails(pt),
+      disabled: !parts.every((part) => pt[part]) && `(no ${parts.find((part) => !pt[part])}: that part of the backup failed)`,
+    })),
+  });
 }
 
 // Registers the restored app with a dedicated read-only backup user.

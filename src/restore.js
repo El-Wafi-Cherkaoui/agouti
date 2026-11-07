@@ -7,13 +7,14 @@
 // No printing here: progress and results go to onEvent.
 import { restoreExcludes } from "./excludes.js";
 import { shield, stopAll } from "./children.js";
-import { loadDump } from "./dump.js";
+import { dumpFilter, loadDump, readDump } from "./dump.js";
+import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { mkdir, readdir, rm, statfs } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { APP_FILE, backupApps } from "./backup.js";
 import { requireConfig, writeAtomic } from "./config.js";
-import { id, optionFileContent, query, str } from "./mysql.js";
+import { id, mysqlClient, optionFileContent, query, str } from "./mysql.js";
 import { paths } from "./paths.js";
 import { ensureRestic, resticEnv, run, runJson } from "./restic.js";
 import { acquireLock, lockFile } from "./state.js";
@@ -37,6 +38,13 @@ export async function listPoints(app, { bin, env }) {
     points.set(point, pt);
   }
   return [...points.values()].sort((a, b) => b.id.localeCompare(a.id));
+}
+
+// What "latest" means: the newest real backup that has every part asked for. Not a
+// point saved before a restore (it may hold the very damage being undone), and not
+// one whose database or files failed.
+export function newestBackup(points, parts = ["database", "files"]) {
+  return points.find((pt) => !pt.safety && parts.every((part) => pt[part]));
 }
 
 // Apps that have backups in the repository, from their latest description (see
@@ -115,6 +123,12 @@ export function copyDatabaseName(database, pointId) {
   return database.slice(0, 64 - suffix.length) + suffix;
 }
 
+// Where a replace tries a backup out first.
+export function checkDatabaseName(database) {
+  const suffix = "_agouti_check";
+  return database.slice(0, 64 - suffix.length) + suffix;
+}
+
 export function copyFolder(p, app, pointId) {
   return join(p.dataDir, "restores", `${app}-${pointId}`);
 }
@@ -176,11 +190,14 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
 
   const release = await acquireLock(p);
   let admin;
-  const state = { safety: null, touchingLive: false };
+  const state = { safety: null, touchingLive: false, checking: null };
   const unguard = guardInterrupts(state, {
     app,
     onEvent,
     cleanup: () => {
+      if (admin && state.checking) {
+        spawnSync(mysqlClient(), [`--defaults-extra-file=${admin.file}`, "-e", `DROP DATABASE IF EXISTS ${id(state.checking)}`], { stdio: "ignore", timeout: 10000 });
+      }
       if (admin) rmSync(admin.file, { force: true });
       rmSync(lockFile(p), { force: true });
     },
@@ -190,7 +207,9 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
     const env = await resticEnv(config, p);
     const points = await listPoints(app, { bin, env });
     if (!points.length) throw new UserError(`${app} has no restore points yet.`, `Make one: sudo agouti backup ${app}`);
-    const point = !opts.point || opts.point === "latest" ? points[0] : points.find((pt) => pt.id === opts.point);
+    const latest = !opts.point || opts.point === "latest";
+    const point = latest ? newestBackup(points, parts) : points.find((pt) => pt.id === opts.point);
+    if (!point && latest) throw new UserError(`No backup of ${app} has ${parts.join(" and ")}: every one is incomplete.`, `See them: sudo agouti restore ${app} --list`);
     if (!point) throw new UserError(`No restore point ${opts.point} for ${app}.`, `See them: sudo agouti restore ${app} --list`);
     for (const part of parts) {
       if (!point[part]) throw new UserError(`Restore point ${point.id} has no ${part} (that part of the backup failed).`, "Pick another restore point.");
@@ -227,6 +246,21 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
     }
 
     const result = { app, point: point.id, at: point.at, mode, ok: true };
+    // Replacing drops the live database, so first prove this backup loads. Once it's
+    // dropped, a damaged backup would leave nothing, and undo may share the same damage.
+    if (mode === "replace" && parts.includes("database")) {
+      onEvent({ type: "check-start", app });
+      state.checking = checkDatabaseName(project.database.name);
+      try {
+        await tryLoading(point, project, { bin, env, admin, name: state.checking, onEvent });
+      } catch (err) {
+        onEvent({ type: "check-failed", app });
+        throw new UserError(`This backup can't be restored, so nothing was replaced. ${err.message}`, err.hint);
+      } finally {
+        state.checking = null;
+      }
+      onEvent({ type: "check-done", app });
+    }
     if (mode === "replace") {
       onEvent({ type: "safety-start", app });
       const [safety] = await backupApps([app], { p, lock: false, log, tags: ["kind=safety"] });
@@ -239,6 +273,17 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
           `Couldn't save the current ${broken.join(" and ")} first, so nothing was replaced.`,
           `${safety[broken[0]].error}. You can still restore as a copy.`,
         );
+      }
+      // The safety point re-uses data already in the repository, damage included. It's
+      // the only way back once the live database is gone, so make sure it can be read.
+      if (parts.includes("database")) {
+        const saved = (await listPoints(app, { bin, env })).find((pt) => pt.id === safety.point);
+        await readDump(saved.database, { bin, env }).catch((err) => {
+          throw new UserError(
+            `The current database was saved, but the saved copy can't be read back, so nothing was replaced. Undo wouldn't work. ${err.message}`,
+            "Your live data is as it was. The backup storage may be damaged: check it, and keep a separate copy of the database before trying again.",
+          );
+        });
       }
     }
 
@@ -300,6 +345,27 @@ function guardInterrupts(state, { app, onEvent, cleanup }) {
     process.off("SIGHUP", ignore);
     process.stdout.off("error", ignore);
   };
+}
+
+// Loads the backup into a throwaway database and drops it again: nothing live is
+// touched. It proves the backup can be read and that this server accepts the dump.
+async function tryLoading(point, project, { bin, env, admin, name, onEvent }) {
+  const q = async (sql) => {
+    const r = await query(admin.file, sql);
+    if (!r.ok) throw new UserError(r.error);
+    return r.rows;
+  };
+  // Keep it out of the binary log, and so off any replica, if this user may.
+  const noLog = (await query(admin.file, "SET SESSION sql_log_bin = 0")).ok ? "SET SESSION sql_log_bin = 0;" : "";
+  const [[charset, collation] = ["utf8mb4", null]] = await q(`SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ${str(project.database.name)}`);
+  await q(`${noLog} DROP DATABASE IF EXISTS ${id(name)}; CREATE DATABASE ${id(name)} CHARACTER SET ${charset}${collation ? ` COLLATE ${collation}` : ""}`);
+  try {
+    const loaded = await loadDump(point.database, name, { bin, env, optionFile: admin.file, onEvent, prelude: noLog, filter: dumpFilter({ skipEvents: true }) });
+    const [[tables]] = await q(`SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ${str(name)} AND TABLE_TYPE = 'BASE TABLE'`);
+    if (Number(tables) !== loaded.tables) throw new UserError(`Only ${tables} of ${loaded.tables} tables could be loaded.`);
+  } finally {
+    await query(admin.file, `${noLog} DROP DATABASE IF EXISTS ${id(name)}`);
+  }
 }
 
 async function restoreDatabase(point, project, { bin, env, admin, mode, onEvent }) {
@@ -433,7 +499,7 @@ export async function restoreFilesByPath(app, pointId, filePaths, { p = paths(),
   const bin = await ensureRestic({ p, log });
   const env = await resticEnv(config, p);
   const points = await listPoints(app, { bin, env });
-  const point = !pointId || pointId === "latest" ? points[0] : points.find((pt) => pt.id === pointId);
+  const point = !pointId || pointId === "latest" ? newestBackup(points, ["files"]) : points.find((pt) => pt.id === pointId);
   if (!point?.files)
     throw new UserError(pointId && pointId !== "latest" ? `No files in restore point ${pointId} of ${app}.` : `${app} has no files backed up yet.`);
   const target = copyFolder(p, app, point.id);
