@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -106,4 +106,13 @@ test("names and sizes", () => {
   assert.equal(suggestName("/var/www/My Shop"), "my-shop");
   assert.equal(formatBytes(2_100_000_000), "2.1 GB");
   assert.equal(formatBytes(640_000_000), "640 MB");
+});
+
+test("dirStats counts files whose names aren't valid UTF-8", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agouti-names-"));
+  const sub = join(dir, "sub");
+  await mkdir(sub);
+  await writeFile(Buffer.concat([Buffer.from(`${sub}/caf`), Buffer.from([0xe9]), Buffer.from(".txt")]), "12345");
+  await writeFile(join(sub, "normal.txt"), "123");
+  assert.deepEqual(await dirStats(dir), { bytes: 8, files: 2 });
 });
