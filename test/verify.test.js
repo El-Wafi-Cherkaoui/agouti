@@ -2,9 +2,9 @@
 // MySQL with binary logging on) refuses triggers, functions and other users'
 // DEFINERs to the restricted agouti_verify user.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readFile, readdir, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { before, test } from "node:test";
@@ -15,7 +15,8 @@ import { dumpFilter } from "../src/dump.js";
 import { scheduledBackup } from "../src/flows/backup.js";
 import { runVerify } from "../src/flows/verify.js";
 import { paths } from "../src/paths.js";
-import { ensureRestic } from "../src/restic.js";
+import { ensureRestic, resticEnv } from "../src/restic.js";
+import { applyRetention } from "../src/retention.js";
 import { loadState } from "../src/state.js";
 import { sameServer, setupVerifier, throwawayName, verifyDue } from "../src/verify.js";
 import { captured, installFakeMysql, laravelFixture } from "./helpers.js";
@@ -108,7 +109,22 @@ async function setup() {
     files: ["storage/app/public", "storage/app/private"],
   };
   await saveConfig({ repository: repo, projects: { shop: project } }, p);
-  return { root, p, dir };
+  return { root, p, dir, repo };
+}
+
+// A restic backup holding its lock on the repository. Killed (as by a reboot or
+// kill -9), it leaves a stale lock behind, as in the rehearsal; alive, a live one.
+async function lockHolder(repo, keyFile, { kill }) {
+  const child = spawn(restic, ["-r", repo, "--password-file", keyFile, "backup", "--stdin", "--stdin-filename", "partial"], { stdio: ["pipe", "ignore", "ignore"] });
+  child.stdin.write("half a dump");
+  const locks = () => readdir(join(repo, "locks")).catch(() => []);
+  for (let i = 0; i < 200 && !(await locks()).length; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.equal((await locks()).length, 1, "restic took its lock");
+  if (kill) {
+    child.kill("SIGKILL");
+    await new Promise((r) => child.on("exit", r));
+  }
+  return { child, locks };
 }
 
 test("set up once: a user limited to agouti_verify_* databases, its password root-only", async (t) => {
@@ -221,4 +237,96 @@ test("agouti verify from the command line", async (t) => {
   const ok = agouti("shop");
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);
   assert.match(ok.stdout, /✓ shop: backup verified/);
+});
+
+test("an interrupted backup's lock doesn't block the restore test; a live one is reported, never verified", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p, repo } = await setup();
+  await setupVerifier({ host: "127.0.0.1", port: 3306 }, { p });
+  await backupApps([], { p });
+
+  const stale = await lockHolder(repo, p.recoveryKey, { kill: true });
+  let r;
+  let out = await captured(async () => (r = await runVerify([], { p })));
+  assert.equal(r.ok, true, out);
+  assert.match(out, /✓ Repository: no errors/);
+  assert.deepEqual(await stale.locks(), [], "the stale lock was removed");
+
+  const live = await lockHolder(repo, p.recoveryKey, { kill: false });
+  try {
+    out = await captured(async () => (r = await runVerify([], { p })));
+  } finally {
+    live.child.kill("SIGKILL");
+  }
+  assert.equal(r.ok, false);
+  assert.equal(r.repository.locked, true);
+  assert.match(out, /⚠ The repository check couldn't run: the storage is in use/);
+  assert.doesNotMatch(out, /backup verified/, "a pass needs the repository check");
+  assert.equal(r.apps[0].status, "warning");
+  assert.equal((await loadState(p)).projects.shop.lastVerify.status, "warning", "the home screen shows ⚠, not ✓");
+});
+
+test("an interrupted backup's lock doesn't stop old restore points from being deleted", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p, repo } = await setup();
+  await backupApps([], { p });
+  await new Promise((r) => setTimeout(r, 1100)); // point ids have one-second resolution
+  await backupApps([], { p });
+  await lockHolder(repo, p.recoveryKey, { kill: true });
+
+  const config = await loadConfig(p);
+  const kept = await applyRetention(config, { bin: restic, env: await resticEnv(config, p), policy: { daily: 1, weekly: 0, monthly: 0 } });
+  assert.deepEqual(kept.apps.shop, { kept: 1, deleted: 1 });
+  assert.equal(kept.pruned, true);
+});
+
+test("damaged backup data that a plain check misses is found: each test reads a different quarter of the data", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { root, p, repo } = await setup();
+  await setupVerifier({ host: "127.0.0.1", port: 3306 }, { p });
+  await backupApps([], { p });
+  const env = await resticEnv(await loadConfig(p), p);
+  const verify = async () => {
+    let r;
+    const out = await captured(async () => (r = await runVerify([], { p })));
+    return { r, out };
+  };
+
+  // Healthy: tests read parts 1, 2, 3, 4, then start over.
+  const parts = [];
+  for (let i = 0; i < 5; i++) {
+    const { r, out } = await verify();
+    assert.equal(r.ok, true, out);
+    parts.push(r.repository.dataPart);
+    if (i === 0) assert.match(out, /✓ Repository: no errors · read part 1 of 4 of the backup data \(all of it every 4 tests\)/);
+  }
+  assert.deepEqual(parts, [1, 2, 3, 4, 1]);
+
+  // Data the app's restore point doesn't use (another backup in the same storage),
+  // damaged in the middle of its data file, as in the rehearsal.
+  const packs = async () => (await readdir(join(repo, "data"), { recursive: true })).filter((f) => /[0-9a-f]{64}$/.test(f));
+  const before = new Set(await packs());
+  const other = join(root, "other.bin");
+  await writeFile(other, Buffer.from(Array.from({ length: 1 << 20 }, () => Math.floor(Math.random() * 256))));
+  assert.equal(spawnSync(restic, ["backup", other], { env }).status, 0);
+  const added = (await packs()).filter((f) => !before.has(f));
+  const sizes = await Promise.all(added.map(async (f) => [(await stat(join(repo, "data", f))).size, f]));
+  const dataPack = join(repo, "data", sizes.sort((a, b) => b[0] - a[0])[0][1]); // the 1 MB of file data, not the small tree pack
+  await chmod(dataPack, 0o644);
+  const fh = await open(dataPack, "r+");
+  await fh.write(Buffer.alloc(64, 0xff), 0, 64, 500000);
+  await fh.close();
+  assert.equal(spawnSync(restic, ["check"], { env }).status, 0, "a plain check doesn't notice: that was #19");
+
+  // Within four tests, the part holding it is read and the test fails.
+  const results = [];
+  for (let i = 0; i < 4; i++) results.push(await verify());
+  const caught = results.filter(({ r }) => !r.repository.ok);
+  assert.equal(caught.length, 1, "exactly one part holds the damaged file");
+  const [{ r, out }] = caught;
+  assert.equal(r.ok, false);
+  assert.equal(r.apps[0].status, "failed");
+  assert.doesNotMatch(out, /backup verified/);
+  assert.match(out, /✕ Repository: .*The storage may be damaged/);
+  assert.deepEqual(results.map(({ r }) => r.repository.dataPart), [2, 3, 4, 1]);
 });

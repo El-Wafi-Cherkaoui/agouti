@@ -19,8 +19,8 @@ import { dumpFilter, loadDump } from "./dump.js";
 import { generatePassword, id, optionFileContent, query, str } from "./mysql.js";
 import { paths } from "./paths.js";
 import { adminConnection, listPoints } from "./restore.js";
-import { ensureRestic, resticEnv, run } from "./restic.js";
-import { acquireLock, loadState, recordVerify } from "./state.js";
+import { EXIT, clearStaleLocks, ensureRestic, lockedMessage, resticEnv, run } from "./restic.js";
+import { acquireLock, loadState, recordDataCheck, recordVerify } from "./state.js";
 import { UserError } from "./ui.js";
 
 export const VERIFY_USER = "agouti_verify";
@@ -84,6 +84,13 @@ export function verifyDue(config, state, now = Date.now()) {
   });
 }
 
+// A plain `restic check` only checks the structure: a damaged data file passes it,
+// and restoring one point reads only that point's data (and only a sample of its
+// files). So each test also reads one part of all the data, a different part each
+// time: every byte is read back once every DATA_PARTS tests (about monthly with
+// weekly tests), at a quarter of the repository's size in downloads per test.
+export const DATA_PARTS = 4;
+
 // Tests the named apps (all when empty). Returns { apps: [result], repository: { ok, error } }.
 export async function verifyApps(names = [], { p = paths(), onEvent = () => {}, log } = {}) {
   const config = await requireConfig(p);
@@ -103,14 +110,23 @@ export async function verifyApps(names = [], { p = paths(), onEvent = () => {}, 
 
     // The repository's structure (indexes, snapshots, packs): one check for all apps.
     onEvent({ type: "repository-start" });
-    const check = await run(bin, ["check"], { env });
-    const repository = check.code === 0 ? { ok: true } : { ok: false, error: lastLine(check.stderr || check.stdout) };
+    await clearStaleLocks(bin, env); // check refuses while an interrupted backup's lock is there
+    const part = (((await loadState(p)).dataCheck?.next ?? 1) - 1) % DATA_PARTS + 1;
+    const check = await run(bin, ["check", `--read-data-subset=${part}/${DATA_PARTS}`], { env });
+    const read = { dataPart: part, dataParts: DATA_PARTS };
+    const repository =
+      check.code === 0
+        ? { ok: true, ...read }
+        : check.code === EXIT.LOCKED
+          ? { ok: false, locked: true, error: lockedMessage("The repository check couldn't run") }
+          : { ok: false, ...read, error: checkError(check.stderr || check.stdout) };
+    if (!repository.locked) await recordDataCheck((part % DATA_PARTS) + 1, p);
     onEvent({ type: "repository-done", result: repository });
 
     const state = await loadState(p);
     const apps = [];
     for (const name of selected) {
-      const result = await verifyApp(name, config.projects[name], { bin, env, config, p, prev: state.projects?.[name]?.lastVerify, onEvent });
+      const result = await verifyApp(name, config.projects[name], { bin, env, config, p, prev: state.projects?.[name]?.lastVerify, onEvent, repository });
       await recordVerify(name, result, p);
       apps.push(result);
     }
@@ -120,7 +136,16 @@ export async function verifyApps(names = [], { p = paths(), onEvent = () => {}, 
   }
 }
 
-async function verifyApp(name, project, { bin, env, config, p, prev, onEvent }) {
+// restic ends with "Fatal: repository contains errors"; the line naming the damaged
+// file comes before it.
+function checkError(text) {
+  const lines = text.trim().split("\n").filter(Boolean);
+  const specific = lines.find((l) => /pack [0-9a-f]{8}|ciphertext verification failed|not referenced|error for tree|is damaged/i.test(l));
+  const last = lines.at(-1)?.replace(/^Fatal:\s*/, "") ?? "";
+  return specific && specific !== lines.at(-1) ? `${last} (${specific.trim().slice(0, 200)})` : last;
+}
+
+async function verifyApp(name, project, { bin, env, config, p, prev, onEvent, repository = { ok: true } }) {
   const started = new Date();
   const points = await listPoints(name, { bin, env });
   const complete = (pt) => pt.database && (!project.files?.length || pt.files);
@@ -136,8 +161,11 @@ async function verifyApp(name, project, { bin, env, config, p, prev, onEvent }) 
   result.database = await part("database", onEvent, () => verifyDatabase(name, project, point, { bin, env, config, onEvent }));
   result.files = await part("files", onEvent, () => verifyFiles(name, point, { bin, env, p }));
   compare(result, prev);
+  // Restoring one point proves little if the repository's structure wasn't checked:
+  // never "verified" then.
+  if (!repository.ok) result.problems.push(repository.locked ? "The repository check couldn't run (the storage was in use)." : `The repository check found errors: ${repository.error}`);
 
-  const failed = !result.database.ok || !result.files.ok;
+  const failed = !result.database.ok || !result.files.ok || (!repository.ok && !repository.locked);
   result.status = failed ? "failed" : result.problems.length ? "warning" : "verified";
   result.seconds = Math.round((Date.now() - started) / 1000);
   onEvent({ type: "app-done", result });

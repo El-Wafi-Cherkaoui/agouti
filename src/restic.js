@@ -136,6 +136,22 @@ export async function probeRepository(bin, env) {
   return { state: "error", message: fatal ? fatal.replace(/^Fatal:\s*/, "") : lastLine(stderr) };
 }
 
+// An interrupted restic (a killed backup, a reboot) leaves its lock in the storage.
+// Backups don't mind, but check, forget and prune need the repository to themselves
+// and refuse until it's gone. `restic unlock` removes only stale locks: from a
+// process on this machine that's no longer running, or not refreshed for 30 minutes
+// (another server's run that died). A live run's lock stays. Failing is harmless
+// (e.g. append-only storage that can't delete): the next step reports the lock.
+export async function clearStaleLocks(bin, env) {
+  const r = await run(bin, ["unlock"], { env });
+  return { ok: r.code === 0, removed: /removed|successfully/i.test(r.stdout + r.stderr) };
+}
+
+// What a restic run that couldn't lock the repository should say.
+export function lockedMessage(what) {
+  return `${what}: the storage is in use by another backup, restore or check that's still running. It runs again next time; if this keeps happening, look for a stuck agouti or restic process.`;
+}
+
 export function lastLine(text) {
   const lines = text.trim().split("\n").filter(Boolean);
   return lines.at(-1) ?? "";

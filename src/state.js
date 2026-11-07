@@ -36,6 +36,13 @@ export async function recordVerify(name, result, p = paths()) {
   await writeAtomic(stateFile(p), JSON.stringify(state, null, 2) + "\n", 0o644);
 }
 
+// Which part of the backup data the next restore test reads (see verify.js).
+export async function recordDataCheck(next, p = paths()) {
+  const state = await loadState(p);
+  state.dataCheck = { next, at: new Date().toISOString() };
+  await writeAtomic(stateFile(p), JSON.stringify(state, null, 2) + "\n", 0o644);
+}
+
 // The last scheduled run's outcome, to say "working again" after a failure.
 export async function recordScheduled(ok, p = paths()) {
   const state = await loadState(p);

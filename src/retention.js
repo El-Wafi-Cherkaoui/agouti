@@ -4,7 +4,7 @@
 // snapshot: restic's own `forget --keep-daily` would judge each part separately and
 // could keep Monday's database with Tuesday's files. Here a point is kept or
 // deleted as a whole.
-import { run } from "./restic.js";
+import { EXIT, clearStaleLocks, lockedMessage, run } from "./restic.js";
 
 export const DEFAULT_RETENTION = { daily: 7, weekly: 4, monthly: 12 };
 // Points made just before a restore replaced live data: kept this long, and kept
@@ -93,13 +93,16 @@ export async function applyRetention(config, { bin, env, policy = config.retenti
 
   if (forget.length) {
     log(`Deleting ${forget.length} old ${forget.length === 1 ? "snapshot" : "snapshots"}...`);
+    await clearStaleLocks(bin, env); // forget and prune refuse while an interrupted run's lock is there
     // In batches, to stay well under the command-line length limit.
     for (let i = 0; i < forget.length; i += 200) {
       const f = await run(bin, ["forget", ...forget.slice(i, i + 200)], { env });
+      if (f.code === EXIT.LOCKED) throw new Error(lockedMessage("Couldn't delete old restore points"));
       if (f.code !== 0) throw new Error(`Couldn't delete old restore points: ${f.stderr.trim().split("\n").at(-1)}`);
     }
     // forget only drops the references; prune frees the space.
     const pr = await run(bin, ["prune"], { env });
+    if (pr.code === EXIT.LOCKED) throw new Error(lockedMessage("Couldn't free the space of deleted restore points"));
     if (pr.code !== 0) throw new Error(`Couldn't free the space of deleted restore points: ${pr.stderr.trim().split("\n").at(-1)}`);
     result.pruned = true;
   }
