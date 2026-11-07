@@ -10,7 +10,7 @@ import { shield, stopAll } from "./children.js";
 import { dumpFilter, loadDump, readDump } from "./dump.js";
 import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
-import { mkdir, readdir, rm, statfs } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, statfs } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { APP_FILE, backupApps } from "./backup.js";
 import { requireConfig, writeAtomic } from "./config.js";
@@ -429,6 +429,9 @@ async function restoreFiles(point, project, { bin, env, mode, origin, target, on
       throw new UserError(`Not enough free disk space for a copy of the files (${point.files.bytes} bytes needed).`);
     }
   }
+  // Every folder is attempted: one with damaged data must not cost the others.
+  const damaged = []; // shown relative to the app, e.g. storage/app/private/x.pdf
+  const failed = [];
   for (const folder of folders) {
     // Copy: keep the layout relative to the app (restores/shop-<point>/storage/app/public).
     // Replace: each backed-up folder in place. --delete is scoped to that folder,
@@ -436,16 +439,37 @@ async function restoreFiles(point, project, { bin, env, mode, origin, target, on
     // backup left out on purpose (it isn't in the snapshot, but must not be deleted).
     const rel = relative(origin, folder);
     const dest = mode === "copy" ? join(target, rel.startsWith("..") ? folder.replace(/^\/+/, "") : rel) : destination(folder, origin, project.path);
-    await mkdir(dest, { recursive: true });
-    const args = ["restore", `${point.files.snapshot}:${folder}`, "--target", dest, ...(mode === "replace" ? ["--delete", ...restoreExcludes(point.files.excludes, folder).flatMap((x) => ["--exclude", x])] : [])];
-    const r = await runJson(bin, args, {
-      env,
-      onMessage: (m) => {
-        if (m.message_type === "status")
-          onEvent({ type: "progress", part: "files", bytesDone: m.bytes_restored ?? 0, totalBytes: m.total_bytes ?? 0, percent: m.percent_done });
-      },
-    });
-    if (r.code !== 0) throw new UserError(`Restoring ${folder} failed: ${cleanRestic(r.stderr)}`);
+    try {
+      await mkdir(dest, { recursive: true });
+      const args = ["restore", `${point.files.snapshot}:${folder}`, "--target", dest, ...(mode === "replace" ? ["--delete", ...restoreExcludes(point.files.excludes, folder).flatMap((x) => ["--exclude", x])] : [])];
+      const r = await runJson(bin, args, {
+        env,
+        onMessage: (m) => {
+          if (m.message_type === "status")
+            onEvent({ type: "progress", part: "files", bytesDone: m.bytes_restored ?? 0, totalBytes: m.total_bytes ?? 0, percent: m.percent_done });
+        },
+      });
+      const bad = await markDamaged(dest, r.errors);
+      damaged.push(...bad.map((item) => join(rel.startsWith("..") ? folder : rel, item)));
+      if (r.code !== 0 && !bad.length) failed.push(`${folder}: ${cleanRestic(r.stderr)}`);
+    } catch (err) {
+      failed.push(`${folder}: ${err.message}`);
+    }
+  }
+  if (damaged.length || failed.length) {
+    const n = damaged.length;
+    const listed = damaged.slice(0, 10).join(", ") + (n > 10 ? `, and ${n - 10} more` : "");
+    const parts = [
+      n && `${n} ${n === 1 ? "file" : "files"} couldn't be restored because the backup data is damaged: ${listed}. Any partial copy was renamed to *.damaged, so it can't pass for a good one`,
+      failed.length && `Not restored: ${failed.join("; ")}`,
+    ].filter(Boolean);
+    return {
+      ok: false,
+      error: `${parts.join(". ")}. Everything else was restored.`,
+      hint: n ? "Restore those files from an older restore point (Restore → A single file), and check the backup storage." : undefined,
+      damaged,
+      folders: folders.length,
+    };
   }
   // restic's restore counts include folders; the backup's own figures are what people expect.
   return {
@@ -455,6 +479,14 @@ async function restoreFiles(point, project, { bin, env, mode, origin, target, on
     bytes: point.files.bytes,
     ...(mode === "copy" ? { path: target } : { paths: folders.map((f) => destination(f, origin, project.path)) }),
   };
+}
+
+// restic leaves a file whose data couldn't be read at full size with wrong contents.
+// Renamed, it can't pass for a good copy. Returns the damaged items, relative to dest.
+async function markDamaged(dest, errors) {
+  const items = [...new Set(errors.filter((m) => m.during === "restore" && m.item).map((m) => m.item.replace(/^\/+/, "")))];
+  for (const item of items) await rename(join(dest, item), join(dest, `${item}.damaged`)).catch(() => {}); // restic may not have written it at all
+  return items;
 }
 
 // Where a backed-up folder goes when the app now lives in `path` (it lived in `origin`).
@@ -511,7 +543,14 @@ export async function restoreFilesByPath(app, pointId, filePaths, { p = paths(),
   const inside = filePaths.every((f) => !relative(project.path, f).startsWith(".."));
   const base = inside ? project.path : "/";
   const include = filePaths.flatMap((f) => ["--include", "/" + relative(base, f)]);
-  const r = await run(bin, ["restore", `${point.files.snapshot}:${base}`, "--target", target, ...include], { env });
+  const r = await runJson(bin, ["restore", `${point.files.snapshot}:${base}`, "--target", target, ...include], { env });
+  const bad = await markDamaged(target, r.errors);
+  if (bad.length) {
+    throw new UserError(
+      `The backup data of ${bad.join(", ")} is damaged in restore point ${point.id}, so it couldn't be restored (any partial copy is in ${target} as *.damaged).`,
+      "Try an older restore point, and check the backup storage.",
+    );
+  }
   if (r.code !== 0) throw new UserError(`Restoring failed: ${cleanRestic(r.stderr)}`);
   const restored = filePaths.map((f) => join(target, relative(base, f)));
   if (!restored.every((f) => existsSync(f)))

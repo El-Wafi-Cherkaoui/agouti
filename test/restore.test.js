@@ -2,6 +2,7 @@
 // keeps each "database" as a folder holding the SQL loaded into it.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -204,6 +205,43 @@ test("replace from a damaged backup: the live database is untouched, and the rea
   assert.deepEqual(await scratchDatabases(), [], "no throwaway database left");
   const after = (await listPoints("shop", { bin: restic, env: await resticEnv(config, p) })).length;
   assert.equal(after, before, "no safety point of a state nothing changed");
+});
+
+test("files: a damaged file is named and renamed, and the other folders are still restored", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p, dir, config } = await setup();
+  // A large new file in private/, the folder restored first: its data lands in packs of its own.
+  const known = new Set(await dataFiles(config.repository));
+  // Random (it can't compress) and 20 MB: restic cuts it into pieces of at most 8 MB,
+  // so at least 3, spread over at least 2 data files. One damaged spot per data file
+  // leaves good pieces, so restic writes the file with wrong contents, as in the rehearsal.
+  await writeFile(join(dir, "storage/app/private/big.bin"), randomBytes(20_000_000));
+  const [b] = await backupApps([], { p });
+  const added = (await dataFiles(config.repository)).filter((f) => !known.has(f));
+  assert.ok(added.length >= 1);
+  // In the middle of the data, as in the rehearsal: restic then writes the file at full
+  // size with wrong contents (damage at the start can mean no file at all).
+  for (const f of added) {
+    await chmod(f, 0o644);
+    const bytes = await readFile(f);
+    for (let i = 0; i < 64; i++) bytes[(bytes.length >> 1) + i] ^= 0xff;
+    await writeFile(f, bytes);
+  }
+
+  const r = await restoreApp({ app: "shop", point: b.point, parts: ["files"], mode: "copy" }, { p });
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.files.damaged, ["storage/app/private/big.bin"]);
+  assert.match(r.files.error, /1 file couldn't be restored because the backup data is damaged: storage\/app\/private\/big\.bin\. Any partial copy was renamed to \*\.damaged/);
+  assert.match(r.files.error, /Everything else was restored/);
+  assert.match(r.files.hint, /older restore point/);
+  const copy = join(p.dataDir, "restores", `shop-${b.point}`, "storage/app");
+  assert.equal(existsSync(join(copy, "private/big.bin")), false, "no file with wrong contents under its real name");
+  assert.ok(existsSync(join(copy, "private/big.bin.damaged")));
+  assert.equal((await readFile(join(copy, "private/invoices/88.pdf"))).length, 500, "the rest of that folder");
+  assert.equal((await readFile(join(copy, "public/avatars/1.jpg"))).length, 1500, "the next folder is still restored");
+
+  // A single file: the same, as an error that names it.
+  await assert.rejects(restoreFilesByPath("shop", b.point, [join(dir, "storage/app/private/big.bin")], { p }), /The backup data of storage\/app\/private\/big\.bin is damaged in restore point/);
 });
 
 test("replace with a dump the server can't load: the live database is untouched", async (t) => {
