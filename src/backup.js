@@ -7,6 +7,7 @@ import { stat } from "node:fs/promises";
 import { hostname } from "node:os";
 import { basename, join } from "node:path";
 import { requireConfig } from "./config.js";
+import { storageReachable } from "./repository.js";
 import { excludePatterns } from "./excludes.js";
 import { dumpCommand } from "./mysql.js";
 import { paths } from "./paths.js";
@@ -28,6 +29,9 @@ export async function backupApps(names = [], { p = paths(), onEvent = () => {}, 
 
   const release = lock ? await acquireLock(p) : async () => {};
   try {
+    // Seconds, not half an hour of restic retrying, when the drive is unplugged.
+    const reach = await storageReachable(config, { p, log });
+    if (!reach.ok) throw new UserError(reach.message, `${reach.hint} Nothing was backed up: check it, then run the backup again.`);
     const bin = await ensureRestic({ p, log });
     const env = await resticEnv(config, p);
     const results = [];

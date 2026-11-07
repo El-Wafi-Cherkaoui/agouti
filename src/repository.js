@@ -1,10 +1,11 @@
 // Core repository operations. No prompts and no printing: both the commands and
 // the interactive app call these, so the two can never drift apart.
-import { rm } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { loadConfig, saveConfig, saveCredentials, saveRecoveryKey } from "./config.js";
 import { paths } from "./paths.js";
 import { generateRecoveryKey } from "./recovery-key.js";
-import { ensureRestic, lastLine, probeRepository, resticEnv, run } from "./restic.js";
+import { EXIT, ensureRestic, lastLine, probeRepository, resticEnv, run } from "./restic.js";
 import { UserError } from "./ui.js";
 
 export async function assertNotConfigured(p = paths()) {
@@ -63,7 +64,49 @@ export async function connectRepository({ repository, credentials, key }, { p = 
 }
 
 // Counts restore points; doubles as a "can we still reach storage?" check.
+// Before a backup: can this server reach the storage at all? restic itself keeps
+// retrying an unreachable storage for about 15 minutes per call, so an unplugged
+// drive meant half an hour of silence and then a message blaming the database.
+// Returns { ok } or { ok: false, message, hint }, in seconds.
+export async function storageReachable(config, { p = paths(), log, timeout = 60_000 } = {}) {
+  const repo = config.repository;
+  if (isLocal(repo)) {
+    // A drive that dropped out can leave a mount that hangs instead of failing.
+    const config = await Promise.race([stat(join(repo, "config")).then(() => true, () => false), sleep(10_000).then(() => "hung")]);
+    if (config === true) return { ok: true };
+    return {
+      ok: false,
+      message: config === "hung" ? `The backup folder ${repo} doesn't respond.` : `The backup folder ${repo} isn't there.`,
+      hint: "Is the drive connected and mounted?",
+    };
+  }
+  const bin = await ensureRestic({ p, log });
+  const r = await run(bin, ["cat", "config", "--no-lock"], { env: await resticEnv(config, p), timeout });
+  if (r.code === 0) return { ok: true };
+  if (r.timedOut) return { ok: false, message: `The backup storage didn't answer within ${timeout / 1000} seconds.`, hint: "Check this server's network connection and the storage provider's status." };
+  if (r.code === EXIT.WRONG_PASSWORD) return { ok: false, message: "The recovery key on this server doesn't open the backup storage.", hint: "Check /etc/agouti/recovery-key." };
+  return { ok: false, message: `Can't reach the backup storage: ${resticReason(r.stderr)}.`, hint: "Check the network, and the storage keys in /etc/agouti/credentials.env." };
+}
+
+const isLocal = (repo) => !/^[a-z0-9]+:/i.test(repo);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms).unref());
+
+// restic's "Fatal: ..." line, without the JSON wrapper it has in --json mode.
+function resticReason(stderr) {
+  const lines = stderr.trim().split("\n").map((l) => {
+    try {
+      return JSON.parse(l).message ?? l;
+    } catch {
+      return l;
+    }
+  });
+  const fatal = lines.find((l) => /^Fatal:/.test(l)) ?? lines.at(-1) ?? "";
+  return fatal.replace(/^Fatal:\s*/, "").split("\n")[0].replace(/[.:]\s*$/, "");
+}
+
 export async function repositoryStatus(config, { p = paths(), log } = {}) {
+  const reach = await storageReachable(config, { p, log });
+  if (!reach.ok) return { reachable: false, message: reach.message, hint: reach.hint };
   const bin = await ensureRestic({ p, log });
   const env = await resticEnv(config, p);
   const { code, stdout, stderr } = await run(bin, ["snapshots", "--json", "--no-lock"], { env });

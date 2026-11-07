@@ -109,9 +109,9 @@ export async function resticEnv(config, p = paths(), extra = {}) {
 
 // Runs restic and collects its output. Never throws on a non-zero exit: callers
 // decide what an exit code means. stdin can be a string/Buffer or a readable stream.
-export function run(bin, args, { env = process.env, stdin } = {}) {
+export function run(bin, args, { env = process.env, stdin, timeout } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(bin, args, { env, stdio: ["pipe", "pipe", "pipe"], ...(timeout ? { timeout, killSignal: "SIGKILL" } : {}) });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -119,7 +119,7 @@ export function run(bin, args, { env = process.env, stdin } = {}) {
     child.on("error", reject);
     // A program that exits without reading its input (EPIPE) is not an error here.
     child.stdin.on("error", () => {});
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.on("close", (code, signal) => resolve({ code, stdout, stderr, timedOut: Boolean(timeout && signal === "SIGKILL") }));
     if (stdin && typeof stdin.pipe === "function") stdin.pipe(child.stdin);
     else child.stdin.end(stdin ?? "");
   });

@@ -280,7 +280,7 @@ export function ago(iso, now = Date.now()) {
 async function checkStorage(config, p) {
   info(dim("Contacting the repository..."));
   const s = await repositoryStatus(config, { p, log: info });
-  if (!s.reachable) throw new UserError(`Can't reach the repository: ${s.message}`, "Check the network and the credentials in /etc/agouti/credentials.env.");
+  if (!s.reachable) throw new UserError(s.message, s.hint);
   ok(`Storage reachable · ${s.snapshots} restore ${s.snapshots === 1 ? "point" : "points"}`);
 }
 

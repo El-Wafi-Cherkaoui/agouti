@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, open, readFile, readdir, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { before, test } from "node:test";
@@ -19,6 +19,7 @@ import { ensureRestic, resticEnv } from "../src/restic.js";
 import { applyRetention } from "../src/retention.js";
 import { acceptChange, flaggedChanges, loadState, recordBackup } from "../src/state.js";
 import { app } from "../src/app.js";
+import { repositoryStatus } from "../src/repository.js";
 import { sameServer, setupVerifier, throwawayName, verifyDue } from "../src/verify.js";
 import { captured, installFakeMysql, laravelFixture, scripted } from "./helpers.js";
 
@@ -421,4 +422,34 @@ test("upgrading: with no baseline yet in the state, a drop stays flagged on the 
     assert.match(r.shrunk ?? "", /down from 2.6 MB/, `backup ${i + 1} after the drop is flagged`);
   }
   assert.equal((await loadState(p)).projects.shop.baseline.point, good.point);
+});
+
+test("storage unplugged: the backup stops in seconds and says so, also on a scheduled run and in Check storage", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p, repo } = await setup();
+  await backupApps([], { p });
+  await rename(repo, `${repo}-unplugged`); // the drive is gone; its mount point may stay, empty
+  await mkdir(repo);
+  try {
+    const started = Date.now();
+    await assert.rejects(backupApps([], { p }), (err) => {
+      assert.equal(err.message, `The backup folder ${repo} isn't there.`);
+      assert.equal(err.hint, "Is the drive connected and mounted? Nothing was backed up: check it, then run the backup again.");
+      return true;
+    });
+    assert.ok(Date.now() - started < 5000, "seconds, not restic's retries");
+
+    await assert.rejects(captured(() => scheduledBackup([], { p })), /isn't there/);
+    assert.equal((await loadState(p)).lastScheduled.ok, false, "the alerts and healthcheck hear about it");
+
+    const s = await repositoryStatus(await loadConfig(p), { p });
+    assert.equal(s.reachable, false);
+    assert.equal(s.message, `The backup folder ${repo} isn't there.`);
+    assert.equal(s.hint, "Is the drive connected and mounted?", "no raw JSON, no advice about cloud keys, no talk of a backup");
+  } finally {
+    await rm(repo, { recursive: true });
+    await rename(`${repo}-unplugged`, repo);
+  }
+  const [back] = await backupApps([], { p });
+  assert.equal(back.ok, true, "plugged back in: works again");
 });
