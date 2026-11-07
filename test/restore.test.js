@@ -120,6 +120,9 @@ test("replace: saves the current state first, then makes the backed-up folders i
   const points = await listPoints("shop", { bin: restic, env });
   const safety = points.find((pt) => pt.id === r.safety.point);
   assert.equal(safety.safety, true);
+  const state = JSON.parse(await readFile(join(p.dataDir, "state.json"), "utf8"));
+  assert.notEqual(state.projects.shop.lastBackup.point, safety.id, "the status doesn't count the safety point as a backup");
+  assert.notEqual(state.projects.shop.lastSuccess.point, safety.id);
   const undo = await restoreApp({ app: "shop", point: safety.id, mode: "replace" }, { p });
   assert.equal(undo.ok, true);
   assert.equal(await liveSql(), DUMP); // the stand-in dump is fixed; files tell the difference:

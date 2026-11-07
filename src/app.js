@@ -18,7 +18,7 @@ import { paths } from "./paths.js";
 import { askRecoveryKey, askStorage, defaultAsk } from "./prompts.js";
 import { normalizeRecoveryKey } from "./recovery-key.js";
 import { connectRepository, createRepository, repositoryStatus } from "./repository.js";
-import { loadState } from "./state.js";
+import { acceptChange, flaggedChanges, loadState } from "./state.js";
 import { scheduleStatus } from "./schedule.js";
 import { describeRepository } from "./storage.js";
 import { UserError, bold, dim, green, info, ok, red, warn, yellow } from "./ui.js";
@@ -105,12 +105,19 @@ async function home(config, ask, p) {
     const s = state.projects[name];
     info(`  ${bold(name.padEnd(14))}${padVisible(lastBackupLabel(s), LABEL)}${verifyLabel(s?.lastVerify, Boolean(config.verify))}`);
   }
+  const flagged = flaggedChanges(state).filter((f) => config.projects?.[f.app]);
+  for (const f of flagged) info(`\n${yellow("⚠")} ${bold(f.app)}: ${changeSummary(f)}`);
   const schedule = await scheduleStatus(config);
   if (apps.length) {
     info("");
     printStatus(schedule, await loadHealthcheck(p), config);
   }
   info("");
+  const acceptChoice = {
+    value: "accept",
+    name: "Accept a change in the data",
+    description: "The data shrank on purpose (deleted, archived): make it the new normal.",
+  };
 
   const backupChoice = { value: "backup", name: "Back up now", description: "Database and files, as one restore point." };
   const addChoice = { value: "add", name: "Add an app", description: "Back up another app's database and uploaded files." };
@@ -131,6 +138,7 @@ async function home(config, ask, p) {
           ? [backupChoice, addChoice, scheduleChoice]
           : [backupChoice, scheduleChoice, addChoice]
         : [addChoice]),
+      ...(flagged.length ? [acceptChoice] : []),
       {
         value: "restore",
         name: "Restore",
@@ -174,10 +182,33 @@ async function home(config, ask, p) {
     if (action === "alerts") await alertsFlow(ask, { p });
     if (action === "check") await checkStorage(config, p);
     if (action === "key") await showKey(ask, p);
+    if (action === "accept") await acceptFlow(ask, flagged, p);
   } catch (err) {
     if (!(err instanceof UserError)) throw err;
     showError(err);
   }
+}
+
+// One line per flagged app for the home screen.
+export function changeSummary(f) {
+  const since = (f.shrunk?.since ?? f.verify?.at ?? "").replace("T", " ").slice(0, 16);
+  const what = [f.shrunk && "its backups shrank sharply", f.verify && "the restore test says the backup looks wrong"].filter(Boolean).join(", and ");
+  return `${what}${since ? ` (since ${since} UTC)` : ""}. Older restore points are kept until this is resolved.`;
+}
+
+async function acceptFlow(ask, flagged, p) {
+  const f =
+    flagged.length === 1
+      ? flagged[0]
+      : await ask.select({ message: "Which app?", choices: flagged.map((x) => ({ value: x, name: x.app })) });
+  info("");
+  if (f.shrunk) info(`  ${f.shrunk.text}`);
+  for (const pr of f.verify?.problems ?? []) info(`  ${pr}`);
+  info(dim(`\nIf this data was lost by accident or an attack, don't accept: restore it from an older point (Restore).`));
+  const yes = await ask.confirm({ message: `Was this data removed from ${f.app} on purpose?`, default: false });
+  if (!yes) return info(dim("Nothing changed. The warning stays until the data is back or you accept it."));
+  await acceptChange(f.app, p);
+  ok(`Accepted: ${f.app}'s current data is the new normal. Old restore points will be deleted as usual again.`);
 }
 
 async function backupNow(ask, apps, p) {
@@ -199,6 +230,7 @@ const padVisible = (text, width) => text + " ".repeat(Math.max(1, width - text.r
 export function lastBackupLabel(s) {
   const last = s?.lastBackup;
   if (!last) return dim("never backed up");
+  if (last.ok && last.shrunk) return `${yellow("⚠")} ${ago(last.at)} ${dim("(data shrank)")}`;
   if (last.ok) return `${green("✓")} ${ago(last.at)}`;
   const good = s.lastSuccess ? `last good: ${ago(s.lastSuccess.at)}` : "no successful backup yet";
   return `${red("✕")} failed ${ago(last.at)} ${dim(`(${good})`)}`;

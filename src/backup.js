@@ -11,7 +11,8 @@ import { excludePatterns } from "./excludes.js";
 import { dumpCommand } from "./mysql.js";
 import { paths } from "./paths.js";
 import { EXIT, ensureRestic, resticEnv, run, runJson } from "./restic.js";
-import { acquireLock, recordBackup } from "./state.js";
+import { acquireLock, baselineOf, loadState, recordBackup } from "./state.js";
+import { formatBytes } from "./detect.js";
 import { UserError } from "./ui.js";
 
 // Backs up the named apps (all when empty). Returns one result per app.
@@ -30,9 +31,15 @@ export async function backupApps(names = [], { p = paths(), onEvent = () => {}, 
     const bin = await ensureRestic({ p, log });
     const env = await resticEnv(config, p);
     const results = [];
+    const safety = tags.includes("kind=safety");
+    const state = await loadState(p);
     for (const name of selected) {
-      const result = await backupApp(name, config.projects[name], { bin, env, onEvent, extraTags: tags });
-      await recordBackup(name, result, p);
+      const s = state.projects[name];
+      const baseline = safety ? undefined : (s?.baseline ?? baselineOf(s?.lastSuccess));
+      const result = await backupApp(name, config.projects[name], { bin, env, onEvent, extraTags: tags, baseline });
+      // A point saved before a restore isn't a backup: counted as one, the status would
+      // say "backed up 5 min ago" while real backups had stopped days ago.
+      if (!safety) await recordBackup(name, result, p);
       results.push(result);
     }
     return results;
@@ -62,7 +69,7 @@ export function pointId(date = new Date()) {
     .replace(/\.\d+Z$/, "Z");
 }
 
-async function backupApp(name, project, { bin, env, onEvent, extraTags = [] }) {
+async function backupApp(name, project, { bin, env, onEvent, extraTags = [], baseline }) {
   const started = new Date();
   const point = pointId(started);
   const tags = ["agouti", `app=${name}`, `point=${point}`, ...extraTags];
@@ -147,8 +154,29 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [] }) {
     files,
     ...(described.ok ? {} : { warning: `The app's description wasn't saved (${described.error}); a new server couldn't find this app.` }),
   };
+  const shrunk = shrinkage(baseline, result);
+  if (shrunk) result.shrunk = shrunk;
   onEvent({ type: "app-done", app: name, result });
   return result;
+}
+
+// A backup of a gutted database looks like any other: restic saves what it's given.
+// So compare with the last normal backup: under half the dump size or half the
+// files is worth a look. Small apps are left alone (a few KB swing easily).
+export function shrinkage(baseline, result) {
+  if (!baseline) return null;
+  const when = baseline.at ? ` in the backup of ${baseline.at.replace("T", " ").slice(0, 16)} UTC` : "";
+  const drops = [];
+  const db = result.database;
+  if (db?.ok && baseline.dbBytes >= 1_000_000 && db.bytes < baseline.dbBytes / 2) {
+    drops.push(`the database dump is ${formatBytes(db.bytes)}, down from ${formatBytes(baseline.dbBytes)}`);
+  }
+  const f = result.files;
+  if (f?.ok && !f.skipped && baseline.files >= 20 && f.files < baseline.files / 2) {
+    drops.push(`${f.files.toLocaleString("en-US")} files, down from ${baseline.files.toLocaleString("en-US")}`);
+  }
+  if (!drops.length) return null;
+  return `The data shrank sharply: ${drops.join("; ")}${when}. If that wasn't deleted on purpose, check the app now: this backup may hold damaged data, and older restore points are kept until this is resolved.`;
 }
 
 function unreadableText(errors) {

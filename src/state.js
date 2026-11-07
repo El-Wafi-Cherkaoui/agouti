@@ -22,18 +22,62 @@ export async function loadState(p = paths()) {
 
 // Keeps the latest result, and the latest successful one, so "failed 6h ago,
 // last good backup 2 days ago" can be shown.
+// The baseline is the last backup that looked normal: a backup whose data shrank
+// sharply is compared with it (not with the backup before, or the warning would go
+// away the next night) until the data comes back or someone accepts the change.
 export async function recordBackup(name, result, p = paths()) {
   const state = await loadState(p);
   const prev = state.projects[name] ?? {};
-  state.projects[name] = { ...prev, lastBackup: result, lastSuccess: result.ok ? result : prev.lastSuccess };
+  const next = { ...prev, lastBackup: result, lastSuccess: result.ok ? result : prev.lastSuccess };
+  if (result.shrunk) {
+    next.shrunk = { since: prev.shrunk?.since ?? result.at, point: result.point, text: result.shrunk };
+    // Keep what it was compared with. State written before baselines existed has
+    // none: without this, the next backup would be compared with this flagged one.
+    next.baseline = prev.baseline ?? baselineOf(prev.lastSuccess);
+  }
+  else if (result.ok) {
+    next.baseline = baselineOf(result);
+    delete next.shrunk;
+  }
+  state.projects[name] = next;
   await writeAtomic(stateFile(p), JSON.stringify(state, null, 2) + "\n", 0o644);
 }
 
-// The latest restore test of an app (see verify.js).
+export function baselineOf(result) {
+  if (!result?.ok) return undefined;
+  return { point: result.point, at: result.at, dbBytes: result.database?.bytes, files: result.files?.skipped ? undefined : result.files?.files };
+}
+
+// The latest restore test of an app (see verify.js), and the last one that passed:
+// the next tests are compared with that one, so a warning stays until it's resolved.
 export async function recordVerify(name, result, p = paths()) {
   const state = await loadState(p);
-  state.projects[name] = { ...(state.projects[name] ?? {}), lastVerify: result };
+  const prev = state.projects[name] ?? {};
+  state.projects[name] = { ...prev, lastVerify: result, ...(result.status === "verified" ? { verifyReference: result } : {}) };
   await writeAtomic(stateFile(p), JSON.stringify(state, null, 2) + "\n", 0o644);
+}
+
+// Someone checked a flagged drop and it's real (data deleted on purpose): the
+// latest backup and restore test become the new normal.
+export async function acceptChange(name, p = paths()) {
+  const state = await loadState(p);
+  const prev = state.projects[name] ?? {};
+  const next = { ...prev };
+  if (prev.lastSuccess) next.baseline = baselineOf(prev.lastSuccess);
+  delete next.shrunk;
+  if (prev.lastVerify?.status === "warning") {
+    next.lastVerify = { ...prev.lastVerify, status: "verified", accepted: new Date().toISOString() };
+    next.verifyReference = next.lastVerify;
+  }
+  state.projects[name] = next;
+  await writeAtomic(stateFile(p), JSON.stringify(state, null, 2) + "\n", 0o644);
+}
+
+// Apps with a flagged drop that nobody has looked at yet.
+export function flaggedChanges(state) {
+  return Object.entries(state.projects ?? {})
+    .filter(([, s]) => s.shrunk || s.lastVerify?.status === "warning")
+    .map(([app, s]) => ({ app, shrunk: s.shrunk, verify: s.lastVerify?.status === "warning" ? s.lastVerify : null }));
 }
 
 // Which part of the backup data the next restore test reads (see verify.js).

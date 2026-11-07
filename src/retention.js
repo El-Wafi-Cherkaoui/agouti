@@ -56,7 +56,8 @@ export function weekKey(d) {
 // Applies the policy to every app in the config. Apps no longer in the config are
 // left alone: deleting someone's last copy of a removed app is not our call.
 // Returns { apps: { name: { kept, deleted } }, pruned }.
-export async function applyRetention(config, { bin, env, policy = config.retention ?? DEFAULT_RETENTION, log = () => {}, now = Date.now() }) {
+// hold: apps to leave alone this time (their data looks damaged, see flaggedChanges).
+export async function applyRetention(config, { bin, env, policy = config.retention ?? DEFAULT_RETENTION, log = () => {}, now = Date.now(), hold = [] }) {
   const r = await run(bin, ["snapshots", "--json", "--tag", "agouti"], { env });
   if (r.code !== 0) throw new Error(`Couldn't list restore points: ${r.stderr.trim().split("\n").at(-1)}`);
   const snapshots = JSON.parse(r.stdout || "[]") ?? [];
@@ -66,7 +67,7 @@ export async function applyRetention(config, { bin, env, policy = config.retenti
     const tag = (name) => s.tags?.find((t) => t.startsWith(`${name}=`))?.slice(name.length + 1);
     const app = tag("app");
     const point = tag("point");
-    if (!app || !point || !config.projects?.[app]) continue;
+    if (!app || !point || !config.projects?.[app] || hold.includes(app)) continue;
     const points = byApp.get(app) ?? new Map();
     const pt = points.get(point) ?? { id: point, at: new Date(s.time), parts: new Set(), snapshots: [] };
     pt.parts.add(tag("part"));

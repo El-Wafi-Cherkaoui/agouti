@@ -8,7 +8,7 @@ import { paths } from "../paths.js";
 import { DEFAULT_RETENTION, applyRetention } from "../retention.js";
 import { ensureRestic, resticEnv } from "../restic.js";
 import { checkProtection } from "../protection.js";
-import { loadState, recordScheduled } from "../state.js";
+import { flaggedChanges, loadState, recordScheduled } from "../state.js";
 import { CHANNELS, loadAlerts, sendAlert } from "../alerts.js";
 import { hostname } from "node:os";
 import { verifyDue } from "../verify.js";
@@ -51,8 +51,9 @@ export async function scheduledBackup(names = [], { p = paths() } = {}) {
     // The backup was saved, but it doesn't hold everything: that has to reach someone.
     for (const r of results) {
       if (r.files.unreadable) fail(`${r.app}: ${r.files.unreadable}`, "The rest was backed up. Check who can read these files, or exclude them in agouti.yml.");
+      if (r.shrunk) fail(`${r.app}: ${r.shrunk}`, "If it's expected, accept it: sudo agouti → Accept a change in the data.");
     }
-    ok = results.every((r) => r.ok && !r.files.unreadable);
+    ok = results.every((r) => r.ok && !r.files.unreadable && !r.shrunk);
 
     const config = await requireConfig(p);
     const policy = config.retention ?? DEFAULT_RETENTION;
@@ -88,7 +89,15 @@ export async function scheduledBackup(names = [], { p = paths() } = {}) {
     } else
       try {
         const bin = await ensureRestic({ p, log: info });
-        const kept = await applyRetention(config, { bin, env: await resticEnv(config, p), policy, log: info });
+        // While an app's data looks damaged, its older (healthy) points must not be
+        // pushed out by the new ones: nothing is deleted for it until it's resolved.
+        const hold = flaggedChanges(await loadState(p)).map((f) => f.app);
+        for (const app of hold) {
+          const line = `Retention paused for ${app}: its data shrank sharply, so older restore points are kept`;
+          info(`${yellow("⚠")} ${line}`);
+          report.push(line);
+        }
+        const kept = await applyRetention(config, { bin, env: await resticEnv(config, p), policy, log: info, hold });
         const deleted = Object.values(kept.apps).reduce((n, a) => n + a.deleted, 0);
         const line = `Retention (${policy.daily} daily, ${policy.weekly} weekly, ${policy.monthly} monthly): ${deleted ? `deleted ${deleted} old restore ${deleted === 1 ? "point" : "points"}` : "nothing to delete"}`;
         info(`${green("✓")} ${line}`);
@@ -197,6 +206,7 @@ function reporter(live) {
       if (r.ok) info(`${green("✓")} Restore point ${bold(`${r.app} @ ${when}`)} ${dim("(UTC)")}`);
       else info(`${red("✕")} ${bold(r.app)}: backup incomplete. ${savedParts(r)}`);
       if (r.warning) info(`  ${yellow("⚠")} ${r.warning}`);
+      if (r.shrunk) info(`${yellow("⚠")} ${bold(r.app)}: ${r.shrunk}`);
     }
   };
 }

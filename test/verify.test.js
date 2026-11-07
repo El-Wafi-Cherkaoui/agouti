@@ -12,14 +12,15 @@ import { fileURLToPath } from "node:url";
 import { backupApps } from "../src/backup.js";
 import { loadConfig, saveConfig, saveRecoveryKey } from "../src/config.js";
 import { dumpFilter } from "../src/dump.js";
-import { scheduledBackup } from "../src/flows/backup.js";
+import { runBackup, scheduledBackup } from "../src/flows/backup.js";
 import { runVerify } from "../src/flows/verify.js";
 import { paths } from "../src/paths.js";
 import { ensureRestic, resticEnv } from "../src/restic.js";
 import { applyRetention } from "../src/retention.js";
-import { loadState } from "../src/state.js";
+import { acceptChange, flaggedChanges, loadState, recordBackup } from "../src/state.js";
+import { app } from "../src/app.js";
 import { sameServer, setupVerifier, throwawayName, verifyDue } from "../src/verify.js";
-import { captured, installFakeMysql, laravelFixture } from "./helpers.js";
+import { captured, installFakeMysql, laravelFixture, scripted } from "./helpers.js";
 
 const CACHE = fileURLToPath(new URL("./.cache", import.meta.url));
 const BIN = fileURLToPath(new URL("../bin/agouti.js", import.meta.url));
@@ -187,8 +188,20 @@ test("a backup that restores but looks wrong is flagged; a corrupted file fails"
   const out = await captured(async () => (r = await runVerify([], { p })));
   assert.equal(r.ok, false);
   assert.equal(r.apps[0].status, "warning");
-  assert.deepEqual(r.apps[0].problems, ["orders: 401 rows in the last test, 11 now."]);
-  assert.match(out, /⚠ shop: the backup restores, but looks wrong:\n {4}orders: 401 rows in the last test, 11 now\./);
+  assert.equal(r.apps[0].problems.length, 1);
+  assert.match(r.apps[0].problems[0], /^orders: 401 rows in the last good test \(\d{4}-\d\d-\d\d\), 11 now\.$/);
+  assert.match(out, /⚠ shop: the backup restores, but looks wrong:\n {4}orders: 401 rows in the last good test/);
+
+  // #33: the same backup tested again still warns: it's compared with the last good test.
+  await captured(async () => (r = await runVerify([], { p })));
+  assert.equal(r.apps[0].status, "warning", "the warning doesn't go away by itself");
+  assert.deepEqual(flaggedChanges(await loadState(p)).map((f) => f.app), ["shop"]);
+  // Until someone accepts it: then that's the new normal.
+  await acceptChange("shop", p);
+  assert.equal((await loadState(p)).projects.shop.lastVerify.status, "verified");
+  assert.deepEqual(flaggedChanges(await loadState(p)), []);
+  await captured(async () => (r = await runVerify([], { p })));
+  assert.equal(r.apps[0].status, "verified");
 
   // A live file that hasn't changed (same size and time) but whose backup differs: corruption.
   const file = join(dir, "storage/app/private/invoices/88.pdf");
@@ -329,4 +342,83 @@ test("damaged backup data that a plain check misses is found: each test reads a 
   assert.doesNotMatch(out, /backup verified/);
   assert.match(out, /✕ Repository: .*The storage may be damaged/);
   assert.deepEqual(results.map(({ r }) => r.repository.dataPart), [2, 3, 4, 1]);
+});
+
+test("a backup whose data shrank sharply is flagged, stays flagged, and holds retention until accepted", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p } = await setup();
+  await writeFile(process.env.FAKE_DUMP, dumpWith(300000)); // about 2 MB
+  const [first] = await backupApps([], { p });
+  assert.equal(first.shrunk, undefined);
+
+  // 45 of 48 tables gone, as in the rehearsal: the dump falls to a few KB.
+  await writeFile(process.env.FAKE_DUMP, dumpWith(10));
+  let r;
+  let out = await captured(async () => ([r] = await runBackup([], { p, live: false })));
+  assert.equal(r.ok, true, "the backup itself worked");
+  assert.match(r.shrunk, /The data shrank sharply: the database dump is [\d.]+ [KM]?B, down from 2.6 MB in the backup of \d{4}-\d\d-\d\d \d\d:\d\d UTC/);
+  assert.match(out, /⚠ shop: The data shrank sharply/);
+
+  // Not just once: the next backup is compared with the last normal one, not with this.
+  await new Promise((res) => setTimeout(res, 1100));
+  await saveConfig({ ...(await loadConfig(p)), retention: { daily: 1, weekly: 0, monthly: 0 } }, p); // would delete 2 of 3
+  out = await captured(() => scheduledBackup([], { p }));
+  assert.match(out, /⚠ shop: The data shrank sharply/);
+  assert.match(out, /Retention paused for shop/);
+  const points = JSON.parse(spawnSync(restic, ["snapshots", "--json", "--tag", "part=database"], { env: await resticEnv(await loadConfig(p), p), encoding: "utf8" }).stdout);
+  assert.equal(points.length, 3, "nothing deleted while flagged, though the policy keeps 1");
+  const state = await loadState(p);
+  assert.equal(state.projects.shop.shrunk.since, r.at, "flagged since the first small backup");
+  assert.equal(state.projects.shop.baseline.point, first.point);
+
+  await acceptChange("shop", p);
+  await new Promise((res) => setTimeout(res, 1100));
+  const [after] = await backupApps([], { p });
+  assert.equal(after.shrunk, undefined, "accepted: the smaller data is the new normal");
+  assert.deepEqual(flaggedChanges(await loadState(p)), []);
+});
+
+test("the home screen shows a flagged drop, and only a deliberate yes accepts it", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p } = await setup();
+  await recordBackup("shop", { ok: true, app: "shop", point: "20261107T104000Z", at: "2026-11-07T10:40:00.000Z", shrunk: "The data shrank sharply: the database dump is 2.7 MB, down from 37 MB." }, p);
+  const accept = (opts) => {
+    const choice = opts.choices.find((c) => c.value === "accept");
+    assert.ok(choice, "offered while something is flagged");
+    return "accept";
+  };
+  const ask = scripted([
+    ["select", /What do you want to do/, accept],
+    ["confirm", /removed from shop on purpose/, (o) => (assert.equal(o.default, false, "No is the safe default"), false)],
+    ["select", /What do you want to do/, accept],
+    ["confirm", /removed from shop on purpose/, true],
+    ["select", /What do you want to do/, (opts) => (assert.equal(opts.choices.find((c) => c.value === "accept"), undefined, "gone once accepted"), "quit")],
+  ]);
+  const out = await captured(() => app({ ask, p }));
+  assert.deepEqual(ask.remaining, []);
+  assert.match(out, /⚠ shop: its backups shrank sharply \(since 2026-11-07 10:40 UTC\)\. Older restore points are kept until this is resolved\./);
+  assert.match(out, /^ {2}shop +⚠ [^\n]*\(data shrank\)/m, "the status table doesn't show ✓ for it");
+  assert.match(out, /The warning stays until the data is back or you accept it/);
+  assert.match(out, /Accepted: shop's current data is the new normal/);
+  assert.deepEqual(flaggedChanges(await loadState(p)), []);
+});
+
+test("upgrading: with no baseline yet in the state, a drop stays flagged on the next backups", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p } = await setup();
+  await writeFile(process.env.FAKE_DUMP, dumpWith(300000));
+  const [good] = await backupApps([], { p });
+  // State as an older version wrote it: no baseline.
+  const file = join(p.dataDir, "state.json");
+  const old = JSON.parse(await readFile(file, "utf8"));
+  delete old.projects.shop.baseline;
+  await writeFile(file, JSON.stringify(old));
+
+  await writeFile(process.env.FAKE_DUMP, dumpWith(10));
+  for (let i = 0; i < 2; i++) {
+    await new Promise((res) => setTimeout(res, 1100));
+    const [r] = await backupApps([], { p });
+    assert.match(r.shrunk ?? "", /down from 2.6 MB/, `backup ${i + 1} after the drop is flagged`);
+  }
+  assert.equal((await loadState(p)).projects.shop.baseline.point, good.point);
 });

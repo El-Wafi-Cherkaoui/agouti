@@ -309,7 +309,9 @@ A backup you have never restored is a guess. Once a week (with the scheduled bac
 - **Database:** loaded into a throwaway database (`agouti_verify_shop`), then every table's rows are counted, and the database is dropped.
 - **Files:** a random sample is restored. Each file is checked for size, and compared byte for byte with the live file when that file hasn't changed since the backup.
 - **Repository:** `restic check` confirms its structure is intact, and reads back one quarter of all the backup data, a different quarter each time. So every byte is read and checked once every 4 tests, about monthly, and each test downloads a quarter of the repository's size (free on a local disk and on R2, billed on S3 and B2). If the check can't run, the test isn't marked verified.
-- **Compared with last week:** a backup can restore perfectly and still hold the wrong thing. If a table lost most of its rows, a table disappeared, or most files are gone, you get a warning, and the healthcheck reports a failure.
+- **Compared with the last good test:** a backup can restore perfectly and still hold the wrong thing. If a table lost most of its rows, a table disappeared, or most files are gone, you get a warning, and the healthcheck reports a failure. The warning stays (later tests are compared with the last good one, not the previous one) until the data is back or you accept the change in the menu.
+
+Backups watch for the same thing: when the database dump drops below half its usual size, or the files below half their usual count, the backup is saved but flagged, an alert goes out on scheduled runs, and older restore points aren't deleted for that app until the data is back or you choose **Accept a change in the data**. A wiped database, a mistaken `DROP` or an attack then can't push your healthy restore points out.
 
 ```sh
 $ sudo agouti verify

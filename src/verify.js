@@ -126,7 +126,7 @@ export async function verifyApps(names = [], { p = paths(), onEvent = () => {}, 
     const state = await loadState(p);
     const apps = [];
     for (const name of selected) {
-      const result = await verifyApp(name, config.projects[name], { bin, env, config, p, prev: state.projects?.[name]?.lastVerify, onEvent, repository });
+      const result = await verifyApp(name, config.projects[name], { bin, env, config, p, prev: reference(state.projects?.[name]), onEvent, repository });
       await recordVerify(name, result, p);
       apps.push(result);
     }
@@ -299,20 +299,46 @@ async function verifyFiles(app, point, { bin, env, p }) {
 }
 
 // Backups that restore fine but hold the wrong thing: compared with the last test.
+// What a test is compared with: the last one that passed. Comparing with the
+// previous test made a warning vanish the week after (the damaged backup became
+// "normal"). State from before this existed: the last test, unless it failed.
+function reference(s) {
+  if (s?.verifyReference) return s.verifyReference;
+  return s?.lastVerify && s.lastVerify.status !== "failed" ? s.lastVerify : undefined;
+}
+
 function compare(result, prev) {
   if (!prev || prev.status === "failed") return;
+  const label = prev.at ? `the last good test (${prev.at.replace("T", " ").slice(0, 10)})` : "the last good test";
   const db = result.database;
   const before = prev.database?.tableRows;
+  const gone = [];
+  const shrank = [];
   if (db?.ok && !db.skipped && before) {
-    for (const [table, n] of Object.entries(before)) {
+    // Biggest losses first: they're the ones worth reading.
+    for (const [table, n] of Object.entries(before).sort((a, b) => b[1] - a[1])) {
       const now = db.tableRows[table];
-      if (now === undefined) result.problems.push(`Table ${table} is gone (${fmt(n)} rows in the last test).`);
-      else if (n >= 100 && now < n / 2) result.problems.push(`${table}: ${fmt(n)} rows in the last test, ${fmt(now)} now.`);
+      if (now === undefined) gone.push([n, table, null]);
+      else if (n >= 100 && now < n / 2) shrank.push([n - now, table, now, n]);
     }
   }
+  const many = gone.length + shrank.length > 3; // then the summary names the test, so the lines don't
+  const where = many ? "before" : `in ${label}`;
+  const lines = [
+    ...gone.map(([n, table]) => `Table ${table} is gone (${fmt(n)} rows ${where}).`),
+    ...shrank.sort((a, b) => b[0] - a[0]).map(([, table, now, n]) => `${table}: ${fmt(n)} rows ${where}, ${fmt(now)} now.`),
+  ];
+  // A gutted database is 35 lines of "Table x is gone": say what it amounts to first.
+  if (many) {
+    const total = Object.keys(before).length;
+    const parts = [gone.length && `${gone.length} of ${total} tables are gone`, shrank.length && `${shrank.length} lost more than half their rows`].filter(Boolean);
+    result.problems.push(`${parts.join(", ")} since ${label}.`);
+    result.problems.push(...lines.slice(0, 8));
+    if (lines.length > 8) result.problems.push(`... and ${lines.length - 8} more.`);
+  } else result.problems.push(...lines);
   const files = result.files;
   if (files?.ok && !files.skipped && prev.files?.total >= 20 && files.total < prev.files.total / 2) {
-    result.problems.push(`Files: ${fmt(prev.files.total)} in the last test, ${fmt(files.total)} now.`);
+    result.problems.push(`Files: ${fmt(prev.files.total)} in ${label}, ${fmt(files.total)} now.`);
   }
 }
 
