@@ -52,8 +52,9 @@ export async function scheduledBackup(names = [], { p = paths() } = {}) {
     for (const r of results) {
       if (r.files.unreadable) fail(`${r.app}: ${r.files.unreadable}`, "The rest was backed up. Check who can read these files, or exclude them in agouti.yml.");
       if (r.shrunk) fail(`${r.app}: ${r.shrunk}`, "If it's expected, accept it: sudo agouti → Accept a change in the data.");
+      if (r.halfRestored) fail(`${r.app}: ${r.halfRestored}`, "Put back the state from before, or run the replace again: sudo agouti.");
     }
-    ok = results.every((r) => r.ok && !r.files.unreadable && !r.shrunk);
+    ok = results.every((r) => r.ok && !r.files.unreadable && !r.shrunk && !r.halfRestored);
 
     const config = await requireConfig(p);
     const policy = config.retention ?? DEFAULT_RETENTION;
@@ -207,6 +208,7 @@ function reporter(live) {
       else info(`${red("✕")} ${bold(r.app)}: backup incomplete. ${savedParts(r)}`);
       if (r.warning) info(`  ${yellow("⚠")} ${r.warning}`);
       if (r.shrunk) info(`${yellow("⚠")} ${bold(r.app)}: ${r.shrunk}`);
+      if (r.halfRestored) info(`${yellow("⚠")} ${bold(r.app)}: ${r.halfRestored}`);
     }
   };
 }

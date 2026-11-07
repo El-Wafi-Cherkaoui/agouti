@@ -12,6 +12,7 @@ import { backupApps } from "../src/backup.js";
 import { loadConfig, saveConfig, saveRecoveryKey } from "../src/config.js";
 import { paths } from "../src/paths.js";
 import { restoreFlow } from "../src/flows/restore.js";
+import { app } from "../src/app.js";
 import { dumpFilter } from "../src/dump.js";
 import { applyRetention } from "../src/retention.js";
 import { copyDatabaseName, discoverApps, listPoints, restoreApp, restoreFilesByPath } from "../src/restore.js";
@@ -123,10 +124,45 @@ test("replace: saves the current state first, then makes the backed-up folders i
   const state = JSON.parse(await readFile(join(p.dataDir, "state.json"), "utf8"));
   assert.notEqual(state.projects.shop.lastBackup.point, safety.id, "the status doesn't count the safety point as a backup");
   assert.notEqual(state.projects.shop.lastSuccess.point, safety.id);
+  assert.equal(state.projects.shop.replacing, undefined, "a replace that finished leaves no warning");
   const undo = await restoreApp({ app: "shop", point: safety.id, mode: "replace" }, { p });
   assert.equal(undo.ok, true);
   assert.equal(await liveSql(), DUMP); // the stand-in dump is fixed; files tell the difference:
   assert.equal(await readFile(join(dir, "storage/app/public/stray.txt"), "utf8"), "added after the backup", "undo works");
+});
+
+test("an unfinished replace is remembered: the home screen warns, backups are flagged, and Put back repairs it", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p } = await setup();
+  // The trial load works; the live one dies halfway (MySQL crashed, the server went down).
+  process.env.FAKE_LOAD_FAIL_DB = "shop_prod";
+  let r;
+  try {
+    r = await restoreApp({ app: "shop", parts: ["database"], mode: "replace" }, { p });
+  } finally {
+    delete process.env.FAKE_LOAD_FAIL_DB;
+  }
+  assert.equal(r.ok, false);
+  assert.match(await liveSql(), /half/, "the live database is half there");
+  const state = JSON.parse(await readFile(join(p.dataDir, "state.json"), "utf8"));
+  assert.equal(state.projects.shop.replacing.safety, r.safety.point);
+  assert.deepEqual(state.projects.shop.replacing.parts, ["database"]);
+
+  const [b] = await backupApps([], { p });
+  assert.match(b.halfRestored, /A replace from the backup of .* didn't finish .*, so this backup may hold half-restored data/);
+
+  const ask = scripted([
+    ["select", /What do you want to do/, (o) => (assert.equal(o.choices[0].value, "unfinished", "first in the menu"), "unfinished")],
+    ["select", /shop: A replace .* didn't finish.*What now/, (o) => (assert.ok(o.choices.find((c) => c.value === "again")), "back")],
+    ["confirm", /Replace shop's live database with the state from before/, true],
+    ["select", /What do you want to do/, (o) => (assert.equal(o.choices.find((c) => c.value === "unfinished"), undefined, "repaired: gone"), "quit")],
+  ]);
+  const out = await captured(() => app({ ask, p }));
+  assert.deepEqual(ask.remaining, []);
+  assert.match(out, /⚠ shop: A replace from the backup of .* didn't finish .*\. The live database may be incomplete\./);
+  // (The stand-in mysqldump always prints the same dump, so the safety point holds that.)
+  assert.equal(await liveSql(), DUMP, "complete again: the half-loaded table is gone");
+  assert.equal(JSON.parse(await readFile(join(p.dataDir, "state.json"), "utf8")).projects.shop.replacing, undefined);
 });
 
 test("replace stops before touching anything if the current state can't be saved", async (t) => {

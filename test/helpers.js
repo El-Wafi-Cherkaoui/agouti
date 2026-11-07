@@ -99,6 +99,7 @@ if (e === -1) {
   if (!fs.existsSync(db(target))) { console.error("ERROR 1049 (42000): Unknown database '" + target + "'"); process.exit(1); }
   const sql = fs.readFileSync(0, "utf8");
   if (process.env.FAKE_LOAD_FAIL) { console.error("ERROR 1064 (42000) at line 2: You have an error in your SQL syntax"); process.exit(1); }
+  if (process.env.FAKE_LOAD_FAIL_DB === target) { fs.writeFileSync(path.join(db(target), "data.sql"), "CREATE TABLE \`half\` (id int);\\n"); console.error("ERROR 2013 (HY000) at line 900: Lost connection to MySQL server during query"); process.exit(1); }
   if (restricted && /^(?!INSERT).*DEFINER=\`/m.test(sql)) { console.error("ERROR 1227 (42000) at line 9: Access denied; you need (at least one of) the SUPER or SET_USER_ID privilege(s) for this operation"); process.exit(1); }
   if (restricted && logBin === "1" && /TRIGGER \`|^CREATE\\s+FUNCTION/m.test(sql)) { console.error("ERROR 1419 (HY000) at line 20: You do not have the SUPER privilege and binary logging is enabled"); process.exit(1); }
   fs.writeFileSync(path.join(db(target), "data.sql"), sql);

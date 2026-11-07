@@ -73,6 +73,18 @@ export async function acceptChange(name, p = paths()) {
   await writeAtomic(stateFile(p), JSON.stringify(state, null, 2) + "\n", 0o644);
 }
 
+// A replace that started changing live data: kept until it finishes, so an
+// interrupted one (Ctrl-C, a crash, a power cut) or a failed part is still on the
+// home screen afterwards, with the way back. null clears it.
+export async function recordReplace(name, replacing, p = paths()) {
+  const state = await loadState(p);
+  const next = { ...(state.projects[name] ?? {}) };
+  if (replacing) next.replacing = replacing;
+  else delete next.replacing;
+  state.projects[name] = next;
+  await writeAtomic(stateFile(p), JSON.stringify(state, null, 2) + "\n", 0o644);
+}
+
 // Apps with a flagged drop that nobody has looked at yet.
 export function flaggedChanges(state) {
   return Object.entries(state.projects ?? {})

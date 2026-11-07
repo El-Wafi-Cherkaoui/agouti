@@ -17,7 +17,7 @@ import { requireConfig, writeAtomic } from "./config.js";
 import { id, mysqlClient, optionFileContent, query, str } from "./mysql.js";
 import { paths } from "./paths.js";
 import { ensureRestic, resticEnv, run, runJson } from "./restic.js";
-import { acquireLock, lockFile } from "./state.js";
+import { acquireLock, lockFile, recordReplace } from "./state.js";
 import { UserError } from "./ui.js";
 
 // Restore points of one app, newest first:
@@ -288,6 +288,9 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
     }
 
     state.touchingLive = mode !== "copy";
+    if (mode === "replace") {
+      await recordReplace(app, { at: new Date().toISOString(), point: point.id, pointAt: point.at, safety: state.safety, parts }, p);
+    }
     for (const part of parts) {
       // Replacing: after a failed part, stop. Undo with the safety point rather than pile on changes.
       if (mode === "replace" && !result.ok) break;
@@ -307,6 +310,7 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
       if (!r.ok) result.ok = false;
       onEvent({ type: "part-done", part, result: r });
     }
+    if (mode === "replace" && result.ok) await recordReplace(app, null, p);
     return result;
   } finally {
     unguard();

@@ -9,7 +9,8 @@ import { offerBringBack } from "./flows/adopt.js";
 import { alertsFlow } from "./flows/alerts.js";
 import { protectFlow, protectionLabel } from "./flows/protect.js";
 import { protectionKind } from "./protection.js";
-import { restoreFlow } from "./flows/restore.js";
+import { restoreFlow, runRestore } from "./flows/restore.js";
+import { replaceText } from "./backup.js";
 import { verifyFlow, verifyLabel } from "./flows/verify.js";
 import { printStatus, scheduleFlow } from "./flows/schedule.js";
 import { loadConfig } from "./config.js";
@@ -18,7 +19,7 @@ import { paths } from "./paths.js";
 import { askRecoveryKey, askStorage, defaultAsk } from "./prompts.js";
 import { normalizeRecoveryKey } from "./recovery-key.js";
 import { connectRepository, createRepository, repositoryStatus } from "./repository.js";
-import { acceptChange, flaggedChanges, loadState } from "./state.js";
+import { acceptChange, flaggedChanges, loadState, recordReplace } from "./state.js";
 import { scheduleStatus } from "./schedule.js";
 import { describeRepository } from "./storage.js";
 import { UserError, bold, dim, green, info, ok, red, warn, yellow } from "./ui.js";
@@ -105,6 +106,9 @@ async function home(config, ask, p) {
     const s = state.projects[name];
     info(`  ${bold(name.padEnd(14))}${padVisible(lastBackupLabel(s), LABEL)}${verifyLabel(s?.lastVerify, Boolean(config.verify))}`);
   }
+  // First: an unfinished replace means live data may be half there.
+  const unfinished = apps.filter(([name]) => state.projects[name]?.replacing).map(([name]) => ({ app: name, ...state.projects[name].replacing }));
+  for (const u of unfinished) info(`\n${red("⚠")} ${bold(u.app)}: ${replaceText(u)}. The live ${u.parts.join(" and ")} may be incomplete.`);
   const flagged = flaggedChanges(state).filter((f) => config.projects?.[f.app]);
   for (const f of flagged) info(`\n${yellow("⚠")} ${bold(f.app)}: ${changeSummary(f)}`);
   const schedule = await scheduleStatus(config);
@@ -133,6 +137,9 @@ async function home(config, ask, p) {
     pageSize: 12,
     choices: [
       // The most likely next step first. Nothing disabled, so the cursor never lands on it.
+      ...(unfinished.length
+        ? [{ value: "unfinished", name: "Repair the interrupted replace", description: "Put back the state from before, or run the replace again." }]
+        : []),
       ...(apps.length
         ? schedule.enabled && !schedule.problem
           ? [backupChoice, addChoice, scheduleChoice]
@@ -183,6 +190,7 @@ async function home(config, ask, p) {
     if (action === "check") await checkStorage(config, p);
     if (action === "key") await showKey(ask, p);
     if (action === "accept") await acceptFlow(ask, flagged, p);
+    if (action === "unfinished") await unfinishedFlow(ask, unfinished, p);
   } catch (err) {
     if (!(err instanceof UserError)) throw err;
     showError(err);
@@ -194,6 +202,32 @@ export function changeSummary(f) {
   const since = (f.shrunk?.since ?? f.verify?.at ?? "").replace("T", " ").slice(0, 16);
   const what = [f.shrunk && "its backups shrank sharply", f.verify && "the restore test says the backup looks wrong"].filter(Boolean).join(", and ");
   return `${what}${since ? ` (since ${since} UTC)` : ""}. Older restore points are kept until this is resolved.`;
+}
+
+async function unfinishedFlow(ask, unfinished, p) {
+  const u = unfinished.length === 1 ? unfinished[0] : await ask.select({ message: "Which app?", choices: unfinished.map((x) => ({ value: x, name: x.app })) });
+  const t = (iso) => `${iso.replace("T", " ").slice(0, 16)} UTC`;
+  const what = u.parts.join(" and ");
+  const choice = await ask.select({
+    message: `${u.app}: ${replaceText(u)}. What now?`,
+    choices: [
+      ...(u.safety
+        ? [{ value: "back", name: `Put back the state from before (${t(u.at)})`, description: `Undo: the ${what} as they were just before the replace.` }]
+        : []),
+      { value: "again", name: `Run the replace again (backup of ${t(u.pointAt)})`, description: `Finish what was started: the ${what} as in that backup.` },
+      { value: "fine", name: "It's been fixed another way", description: "Only removes this warning. Nothing is restored." },
+      { value: "cancel", name: "Back" },
+    ],
+  });
+  if (choice === "cancel") return;
+  if (choice === "fine") {
+    if (!(await ask.confirm({ message: `Is ${u.app}'s live data complete again?`, default: false }))) return;
+    await recordReplace(u.app, null, p);
+    return ok("Warning removed.");
+  }
+  const point = choice === "back" ? u.safety : u.point;
+  if (!(await ask.confirm({ message: `Replace ${u.app}'s live ${what} with ${choice === "back" ? "the state from before" : "that backup"}?`, default: true }))) return;
+  await runRestore({ app: u.app, point, parts: u.parts, mode: "replace" }, { p });
 }
 
 async function acceptFlow(ask, flagged, p) {

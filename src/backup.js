@@ -36,7 +36,8 @@ export async function backupApps(names = [], { p = paths(), onEvent = () => {}, 
     for (const name of selected) {
       const s = state.projects[name];
       const baseline = safety ? undefined : (s?.baseline ?? baselineOf(s?.lastSuccess));
-      const result = await backupApp(name, config.projects[name], { bin, env, onEvent, extraTags: tags, baseline });
+      const replacing = safety ? undefined : s?.replacing;
+      const result = await backupApp(name, config.projects[name], { bin, env, onEvent, extraTags: tags, baseline, replacing });
       // A point saved before a restore isn't a backup: counted as one, the status would
       // say "backed up 5 min ago" while real backups had stopped days ago.
       if (!safety) await recordBackup(name, result, p);
@@ -69,7 +70,7 @@ export function pointId(date = new Date()) {
     .replace(/\.\d+Z$/, "Z");
 }
 
-async function backupApp(name, project, { bin, env, onEvent, extraTags = [], baseline }) {
+async function backupApp(name, project, { bin, env, onEvent, extraTags = [], baseline, replacing }) {
   const started = new Date();
   const point = pointId(started);
   const tags = ["agouti", `app=${name}`, `point=${point}`, ...extraTags];
@@ -156,8 +157,15 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [], bas
   };
   const shrunk = shrinkage(baseline, result);
   if (shrunk) result.shrunk = shrunk;
+  if (replacing) result.halfRestored = `${replaceText(replacing)}, so this backup may hold half-restored data.`;
   onEvent({ type: "app-done", app: name, result });
   return result;
+}
+
+// "A replace from 2026-11-05 10:32 UTC didn't finish (started 2026-11-07 12:30 UTC)"
+export function replaceText(r) {
+  const t = (iso) => `${iso.replace("T", " ").slice(0, 16)} UTC`;
+  return `A replace from the backup of ${t(r.pointAt)} didn't finish (started ${t(r.at)})`;
 }
 
 // A backup of a gutted database looks like any other: restic saves what it's given.
