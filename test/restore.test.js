@@ -437,6 +437,29 @@ test("new server: the app is restored into empty places and set up to be backed 
   assert.equal((await stat(config.projects.shop.database.credentials)).mode & 0o777, 0o600);
 });
 
+test("new server: folders Agouti creates get the owner and permissions recorded in the backup", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const old = await setup();
+  await chmod(join(old.dir, "storage/app/private"), 0o2770); // setgid, group-writable: a shared upload folder
+  await chmod(join(old.dir, "storage/app"), 0o750);
+  const [b] = await backupApps([], { p: old.p });
+  await chmod(join(old.dir, "storage/app"), 0o755);
+
+  const { root, p } = await newServer(old);
+  const dir = join(root, "srv/shop");
+  await mkdir(join(dir, "storage"), { recursive: true });
+  await chmod(join(dir, "storage"), 0o700); // already there: not ours to change
+  const project = { path: dir, database: { engine: "mysql", name: "shop_new", host: "localhost", port: 3306 }, files: old.config.projects.shop.files };
+  const r = await restoreApp({ app: "shop", mode: "new", project, origin: old.dir, point: b.point }, { p });
+  assert.equal(r.ok, true);
+
+  const mode = async (rel) => (await stat(join(dir, rel))).mode & 0o7777;
+  assert.equal(await mode("storage/app/private"), 0o2770, "the restored folder");
+  assert.equal(await mode("storage/app"), 0o750, "a parent folder Agouti had to create");
+  assert.equal((await stat(join(dir, "storage/app/private"))).uid, process.getuid(), "the recorded owner (chown needs root; here it's us)");
+  assert.equal(await mode("storage"), 0o700, "a folder that already existed is left alone");
+});
+
 test("new server: never overwrites what's already there", async (t) => {
   if (!restic) return t.skip("restic unavailable");
   const old = await setup();

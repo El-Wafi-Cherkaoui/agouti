@@ -10,8 +10,8 @@ import { shield, stopAll } from "./children.js";
 import { dumpFilter, loadDump, readDump } from "./dump.js";
 import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
-import { mkdir, readdir, rename, rm, statfs } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { chmod, chown, mkdir, readdir, rename, rm, statfs } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
 import { APP_FILE, backupApps } from "./backup.js";
 import { requireConfig, writeAtomic } from "./config.js";
 import { id, mysqlClient, optionFileContent, query, str } from "./mysql.js";
@@ -440,6 +440,9 @@ async function restoreFiles(point, project, { bin, env, mode, origin, target, on
     const rel = relative(origin, folder);
     const dest = mode === "copy" ? join(target, rel.startsWith("..") ? folder.replace(/^\/+/, "") : rel) : destination(folder, origin, project.path);
     try {
+      // New server: the folders mkdir creates would belong to root, and the app
+      // couldn't write into them. Afterwards they get the owner the backup recorded.
+      const created = mode === "new" ? await missingDirs(dest, project.path) : [];
       await mkdir(dest, { recursive: true });
       const args = ["restore", `${point.files.snapshot}:${folder}`, "--target", dest, ...(mode === "replace" ? ["--delete", ...restoreExcludes(point.files.excludes, folder).flatMap((x) => ["--exclude", x])] : [])];
       const r = await runJson(bin, args, {
@@ -449,6 +452,7 @@ async function restoreFiles(point, project, { bin, env, mode, origin, target, on
             onEvent({ type: "progress", part: "files", bytesDone: m.bytes_restored ?? 0, totalBytes: m.total_bytes ?? 0, percent: m.percent_done });
         },
       });
+      if (created.length) await applyRecordedOwners(created, { bin, env, snapshot: point.files.snapshot, toBackup: (d) => join(origin, relative(project.path, d)) });
       const bad = await markDamaged(dest, r.errors);
       damaged.push(...bad.map((item) => join(rel.startsWith("..") ? folder : rel, item)));
       if (r.code !== 0 && !bad.length) failed.push(`${folder}: ${cleanRestic(r.stderr)}`);
@@ -479,6 +483,41 @@ async function restoreFiles(point, project, { bin, env, mode, origin, target, on
     bytes: point.files.bytes,
     ...(mode === "copy" ? { path: target } : { paths: folders.map((f) => destination(f, origin, project.path)) }),
   };
+}
+
+// The folders from `dir` up to (not including) `root` that don't exist yet, deepest first.
+async function missingDirs(dir, root) {
+  const out = [];
+  for (let d = dir; d !== root && d.startsWith(root) && !existsSync(d); d = dirname(d)) out.push(d);
+  return out;
+}
+
+// Gives each folder the owner and permissions it had in the backup. Folders the
+// backup doesn't know (above what was backed up) are left alone.
+async function applyRecordedOwners(dirs, { bin, env, snapshot, toBackup }) {
+  for (const dir of dirs) {
+    const path = toBackup(dir);
+    const r = await run(bin, ["ls", "--json", snapshot, path], { env });
+    if (r.code !== 0) continue;
+    const node = r.stdout
+      .split("\n")
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .find((n) => n?.type === "dir" && n.path === path);
+    if (!node) continue;
+    await chown(dir, node.uid, node.gid).catch(() => {}); // needs root; tests run without
+    await chmod(dir, unixMode(node.mode)).catch(() => {});
+  }
+}
+
+// restic stores Go's os.FileMode: permission bits plus setuid/setgid/sticky as high bits.
+export function unixMode(goMode) {
+  return (goMode & 0o777) | (goMode & (1 << 23) ? 0o4000 : 0) | (goMode & (1 << 22) ? 0o2000 : 0) | (goMode & (1 << 20) ? 0o1000 : 0);
 }
 
 // restic leaves a file whose data couldn't be read at full size with wrong contents.
