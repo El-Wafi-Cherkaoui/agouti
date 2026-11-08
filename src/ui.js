@@ -46,7 +46,13 @@ export class UserError extends Error {
 // for people to paste (often as root). Upload names are chosen by users: a quote
 // must not end the string, and control characters (newlines, terminal escapes)
 // are written as \n, \x1b... inside $'...' so they're visible and inert.
+// A Buffer path (a name that isn't valid UTF-8) is written byte for byte as \xNN.
 export function shellQuote(s) {
+  if (Buffer.isBuffer(s)) {
+    if (Buffer.from(s.toString("utf8")).equals(s)) return shellQuote(s.toString("utf8"));
+    const esc = [...s].map((b) => (b === 0x27 || b === 0x5c ? `\\${String.fromCharCode(b)}` : b < 0x20 || b >= 0x7f ? `\\x${b.toString(16).padStart(2, "0")}` : String.fromCharCode(b))).join("");
+    return `$'${esc}'`;
+  }
   if (/^[A-Za-z0-9_\/.,:@%+=-]+$/.test(s)) return s;
   if (/[\x00-\x1f\x7f]/.test(s)) {
     const esc = s.replace(/[\\']/g, (c) => `\\${c}`).replace(/[\x00-\x1f\x7f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);

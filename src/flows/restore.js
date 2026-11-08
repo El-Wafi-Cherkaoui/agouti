@@ -1,6 +1,6 @@
 // Restoring, interactively ("Restore" in the app, or `sudo agouti restore`), and the
 // output shared with `agouti restore <app> ...`.
-import { basename, relative } from "node:path";
+import { basename, dirname, relative } from "node:path";
 import { mysqlClient } from "../mysql.js";
 import { ago } from "../app.js";
 import { requireConfig } from "../config.js";
@@ -10,6 +10,7 @@ import { adminConnection, copyDatabaseName, discoverApps, findFiles, listPoints,
 import { bringBack, describeFound } from "./adopt.js";
 import { clearLaravelCache } from "../laravel.js";
 import { flaggedPoints } from "../state.js";
+import { onDisk } from "../names.js";
 import { ensureRestic, resticEnv } from "../restic.js";
 import { UserError, bold, dim, green, info, red, shellQuote, warn, yellow } from "../ui.js";
 
@@ -190,8 +191,8 @@ async function singleFile(ask, { app, project, point, bin, env, p }) {
     });
     if (!choice) continue;
     const [restored] = await restoreFilesByPath(app, point.id, [choice], { p });
-    info(`${green("✓")} Restored to ${bold(restored)}`);
-    info(dim(`The live file was not touched. To put it back:\n  sudo cp -a ${shellQuote(restored)} ${shellQuote(choice)}`));
+    info(`${green("✓")} Restored to ${bold(String(restored))}`);
+    info(dim(`The live file was not touched. To put it back:\n  sudo cp -a ${shellQuote(restored)} ${shellQuote(await livePathFor(choice, restored))}`));
     return;
   }
 }
@@ -282,6 +283,16 @@ function nextSteps(r) {
     if (r.ok && r.framework === "laravel") lines.push("Bring the app back up (php artisan up) once you've checked it.");
   }
   if (lines.length) info(dim(`\n${lines.join("\n")}`));
+}
+
+// Where the restored file goes back to, byte for byte: the live file if it's there
+// (its listed name may have lost bytes), else its folder plus the restored name.
+async function livePathFor(listed, restored) {
+  const live = await onDisk(listed);
+  if (live) return live;
+  const folder = (await onDisk(dirname(listed))) ?? dirname(listed);
+  const name = Buffer.isBuffer(restored) ? restored.subarray(restored.lastIndexOf(0x2f) + 1) : Buffer.from(basename(restored));
+  return Buffer.concat([Buffer.from(String(folder) === "/" ? "" : folder), Buffer.from("/"), name]);
 }
 
 export function printPoints(app, points) {

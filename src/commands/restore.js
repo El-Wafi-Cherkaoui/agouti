@@ -70,7 +70,7 @@ export async function restore({ positionals, values }, { ask = defaultAsk, p = p
     if (values.replace || values.only) throw new UserError("--file restores into the copy folder; it can't be combined with --replace or --only.");
     const path = isAbsolute(values.file) ? values.file : join(config.projects[app].path, values.file);
     const [restored] = await restoreFilesByPath(app, values.point, [path], { p, log: info });
-    return info(`${green("✓")} Restored to ${bold(restored)}`);
+    return info(`${green("✓")} Restored to ${bold(String(restored))}`);
   }
 
   if (values.only && !["database", "files"].includes(values.only)) throw new UserError("--only must be database or files.");

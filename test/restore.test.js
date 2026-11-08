@@ -419,6 +419,28 @@ test("php is found where sudo's PATH doesn't look: in the app owner's home (Lara
   assert.equal(await findPhp(home, { path: sudoPath }), join(home, ".config/herd-lite/bin/php"));
 });
 
+test("single files with awkward names: not valid UTF-8 (Latin-1), and pattern characters", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p, dir } = await setup();
+  const folder = join(dir, "storage/app/private");
+  const latin1 = Buffer.concat([Buffer.from(`${folder}/caf`), Buffer.from([0xe9]), Buffer.from(".pdf")]);
+  await writeFile(latin1, "latin1 content");
+  await writeFile(join(folder, "rapport[1].pdf"), "bracket content");
+  await writeFile(join(folder, "rapport1.pdf"), "a different file");
+  const [b] = await backupApps([], { p });
+
+  // As the search lists it: the byte that isn't UTF-8 became U+FFFD.
+  const [restored] = await restoreFilesByPath("shop", b.point, [`${folder}/caf\uFFFD.pdf`], { p });
+  assert.ok(Buffer.isBuffer(restored), "the real name, byte for byte");
+  assert.equal(await readFile(restored, "utf8"), "latin1 content");
+  const [bracket] = await restoreFilesByPath("shop", b.point, [join(folder, "rapport[1].pdf")], { p });
+  assert.equal(await readFile(bracket, "utf8"), "bracket content");
+
+  // The hint to put it back names those exact bytes.
+  const { shellQuote } = await import("../src/ui.js");
+  assert.deepEqual(spawnSync("bash", ["-c", `printf %s ${shellQuote(restored)}`]).stdout, restored);
+});
+
 // A second server using the same repository: nothing set up yet.
 async function newServer(from) {
   const root = await mkdtemp(join(tmpdir(), "agouti-newserver-"));

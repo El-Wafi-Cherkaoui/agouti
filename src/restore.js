@@ -17,6 +17,7 @@ import { requireConfig, writeAtomic } from "./config.js";
 import { id, mysqlClient, optionFileContent, query, str } from "./mysql.js";
 import { paths } from "./paths.js";
 import { ensureRestic, resticEnv, run, runJson } from "./restic.js";
+import { includePattern, onDisk } from "./names.js";
 import { acquireLock, flaggedPoints, lockFile, recordReplace } from "./state.js";
 import { UserError } from "./ui.js";
 
@@ -584,7 +585,7 @@ export async function restoreFilesByPath(app, pointId, filePaths, { p = paths(),
   // Files outside the app (it was moved since) keep their full path.
   const inside = filePaths.every((f) => !relative(project.path, f).startsWith(".."));
   const base = inside ? project.path : "/";
-  const include = filePaths.flatMap((f) => ["--include", "/" + relative(base, f)]);
+  const include = filePaths.flatMap((f) => ["--include", includePattern("/" + relative(base, f))]);
   const r = await runJson(bin, ["restore", `${point.files.snapshot}:${base}`, "--target", target, ...include], { env });
   const bad = await markDamaged(target, r.errors);
   if (bad.length) {
@@ -594,8 +595,9 @@ export async function restoreFilesByPath(app, pointId, filePaths, { p = paths(),
     );
   }
   if (r.code !== 0) throw new UserError(`Restoring failed: ${cleanRestic(r.stderr)}`);
-  const restored = filePaths.map((f) => join(target, relative(base, f)));
-  if (!restored.every((f) => existsSync(f)))
+  // Real paths on disk (a Buffer when the name isn't valid UTF-8; see names.js).
+  const restored = await Promise.all(filePaths.map((f) => onDisk(join(target, relative(base, f)))));
+  if (!restored.every(Boolean))
     throw new UserError(`Not in this restore point: ${filePaths.join(", ")}`, `Point ${point.id}. Pick another with --point.`);
   return restored;
 }

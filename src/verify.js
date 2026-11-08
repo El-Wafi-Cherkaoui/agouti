@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { requireConfig, saveConfig, writeAtomic } from "./config.js";
 import { dumpFilter, loadDump } from "./dump.js";
 import { generatePassword, id, optionFileContent, query, str } from "./mysql.js";
+import { includePattern, onDisk } from "./names.js";
 import { paths } from "./paths.js";
 import { adminConnection, listPoints } from "./restore.js";
 import { EXIT, clearStaleLocks, ensureRestic, lockedMessage, resticEnv, run } from "./restic.js";
@@ -267,12 +268,13 @@ async function verifyFiles(app, point, { bin, env, p }) {
   await rm(tmp, { recursive: true, force: true });
   await mkdir(tmp, { recursive: true, mode: 0o700 });
   try {
-    const r = await run(bin, ["restore", point.files.snapshot, "--target", tmp, ...sample.flatMap((n) => ["--include", n.path])], { env });
+    const r = await run(bin, ["restore", point.files.snapshot, "--target", tmp, ...sample.flatMap((n) => ["--include", includePattern(n.path)])], { env });
     if (r.code !== 0) return { ok: false, error: `Restoring a sample of files failed: ${lastLine(r.stderr)}` };
     let compared = 0;
     const bad = [];
     for (const n of sample) {
-      const restored = join(tmp, n.path);
+      // As it really is on disk: listed names lose bytes that aren't valid UTF-8.
+      const restored = (await onDisk(join(tmp, n.path))) ?? join(tmp, n.path);
       const s = await stat(restored).catch(() => null);
       if (!s || s.size !== n.size) {
         bad.push(`${n.path}: ${s ? `${s.size} bytes, expected ${n.size}` : "missing after restore"}`);
@@ -280,10 +282,11 @@ async function verifyFiles(app, point, { bin, env, p }) {
       }
       // Unchanged since the backup (same size and modification time)? Then the
       // restored copy must be byte-for-byte the live one.
-      const live = await stat(n.path).catch(() => null);
+      const livePath = (await onDisk(n.path)) ?? n.path;
+      const live = await stat(livePath).catch(() => null);
       if (live && live.size === n.size && Math.abs(live.mtimeMs - preciseMs(n.mtime)) < 1) {
         compared++;
-        if ((await sha256(restored)) !== (await sha256(n.path))) bad.push(`${n.path}: content differs from the live file, which hasn't changed`);
+        if ((await sha256(restored)) !== (await sha256(livePath))) bad.push(`${n.path}: content differs from the live file, which hasn't changed`);
       }
     }
     return {

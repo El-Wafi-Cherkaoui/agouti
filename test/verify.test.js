@@ -507,3 +507,18 @@ test("a backup program killed mid-run is described as such, not as 'exit code nu
   const { describeFailure } = await import("../src/backup.js");
   assert.equal(describeFailure({ code: null, signal: "SIGKILL", messages: [], stderr: "" }, "restic"), "the backup program was stopped (SIGKILL) before it finished");
 });
+
+test("the restore test samples awkward names without false alarms (not valid UTF-8, pattern characters)", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p, dir } = await setup();
+  await setupVerifier({ host: "127.0.0.1", port: 3306 }, { p });
+  const folder = join(dir, "storage/app/private");
+  await writeFile(Buffer.concat([Buffer.from(`${folder}/caf`), Buffer.from([0xe9]), Buffer.from(".pdf")]), "latin1 content");
+  await writeFile(join(folder, "rapport[1].pdf"), "bracket content");
+  await backupApps([], { p });
+  let r;
+  const out = await captured(async () => (r = await runVerify([], { p })));
+  assert.equal(r.apps[0].files.ok, true, out);
+  assert.equal(r.apps[0].files.sampled, 4, "every file is in the sample here");
+  assert.equal(r.apps[0].files.compared, 4, "and each compared byte for byte with the live one");
+});
