@@ -3,7 +3,7 @@
 import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { spawn } from "./children.js";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { writeAtomic } from "./config.js";
 import { UserError } from "./ui.js";
 
@@ -136,10 +136,13 @@ export function generatePassword() {
 // flavor: which server the SQL is for (see clientFlavor). The grant that lets a
 // read-only user see stored procedures is different on each and an error on the
 // other, which would stop a pasted script halfway. Unknown: both, as comments.
-export function backupUserSql({ database, username = "agouti_backup", host = "localhost", password, flavor }) {
+// IF NOT EXISTS + ALTER: running it again (say, after a failed first try, with a
+// new password) updates the existing user instead of stopping at "already exists".
+export function backupUserSql({ database, username, host = "localhost", password, flavor }) {
   const who = `${str(username)}@${str(host)}`;
   return [
-    `CREATE USER ${who} IDENTIFIED BY ${str(password)};`,
+    `CREATE USER IF NOT EXISTS ${who} IDENTIFIED BY ${str(password)};`,
+    `ALTER USER ${who} IDENTIFIED BY ${str(password)};`,
     `GRANT SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT ON ${id(database)}.* TO ${who};`,
     ...(flavor === "mariadb"
       ? [`GRANT SELECT ON mysql.proc TO ${who};`]
@@ -216,8 +219,18 @@ export async function dumpCommand(optionFile, database, { bin = dumpClient() } =
 // connection: the same privileges as backupUserSql(). One user per app, so
 // setting up a second app never changes the first one's password.
 // host: "localhost" for a local server (socket), "%" for one reached over the network.
+// One backup user per app: two apps sharing one would share its password, and
+// setting up the second would lock out the first. MySQL allows 32 characters, so
+// a long name keeps its start plus a short code from the full name: two long,
+// similar names don't end up as the same user.
+export function backupUserName(app) {
+  const name = `agouti_${app.replace(/[^A-Za-z0-9_]/g, "_")}`;
+  if (name.length <= 32) return name;
+  return `${name.slice(0, 25).replace(/_+$/, "")}_${createHash("sha256").update(app).digest("hex").slice(0, 6)}`;
+}
+
 export async function createBackupUser(adminFile, { app, database, host = "localhost" }) {
-  const username = `agouti_${app.replace(/-/g, "_")}`.slice(0, 32);
+  const username = backupUserName(app);
   const password = generatePassword();
   const who = `${str(username)}@${str(host)}`;
   const r = await query(

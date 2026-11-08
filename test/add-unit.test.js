@@ -5,20 +5,34 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { detectApp, dirStats, fileCandidates, formatBytes, suggestName } from "../src/detect.js";
 import { databaseSettingsFrom } from "../src/envfile.js";
-import { backupUserSql, clientFlavor, dumpClient, mysqlClient, optionFileContent } from "../src/mysql.js";
+import { backupUserName, backupUserSql, clientFlavor, dumpClient, mysqlClient, optionFileContent } from "../src/mysql.js";
 import { validateFolders } from "../src/projects.js";
 import { UserError } from "../src/ui.js";
 import { ENV, laravelFixture } from "./helpers.js";
 
 test("backup user SQL: only the grant the server accepts, so a pasted script runs to the end", () => {
   const who = "'agouti_backup'@'localhost'";
-  const statements = (flavor) => backupUserSql({ database: "d", password: "p", flavor }).split("\n").filter((l) => !l.startsWith("--")).join("\n");
+  const statements = (flavor) => backupUserSql({ database: "d", username: "agouti_backup", password: "p", flavor }).split("\n").filter((l) => !l.startsWith("--")).join("\n");
   assert.ok(statements("mariadb").includes(`GRANT SELECT ON mysql.proc TO ${who};`));
   assert.ok(!statements("mariadb").includes("SHOW_ROUTINE"));
   assert.ok(statements("mysql").includes(`GRANT SHOW_ROUTINE ON *.* TO ${who};`));
   assert.ok(!statements("mysql").includes("mysql.proc"));
   assert.ok(!statements(null).includes("SHOW_ROUTINE") && !statements(null).includes("mysql.proc"));
-  assert.match(backupUserSql({ database: "d", password: "p", flavor: null }), /MariaDB: +GRANT SELECT ON mysql.proc/);
+  assert.match(backupUserSql({ database: "d", username: "agouti_backup", password: "p", flavor: null }), /MariaDB: +GRANT SELECT ON mysql.proc/);
+});
+
+test("backup user names: one per app, MySQL's 32-character limit, and no two apps sharing one", () => {
+  assert.equal(backupUserName("shop"), "agouti_shop");
+  assert.ok(backupUserName("school-management-inventory").length <= 32);
+  assert.match(backupUserName("school-management-inventory"), /^agouti_school_management_[0-9a-f]{6}$/);
+  assert.notEqual(backupUserName("school-management-inventory"), backupUserName("school-management-inventory-v2"), "long, similar names stay apart");
+  assert.equal(backupUserName("school-management-inventory"), backupUserName("school-management-inventory"), "the same app always gets the same name");
+  assert.match(backupUserName("a.b c"), /^agouti_a_b_c$/);
+});
+
+test("backup user SQL can be run again: a retry with a new password updates the user", () => {
+  const sql = backupUserSql({ database: "d", username: "agouti_shop", password: "new", flavor: "mysql" });
+  assert.match(sql, /^CREATE USER IF NOT EXISTS 'agouti_shop'@'localhost' IDENTIFIED BY 'new';\nALTER USER 'agouti_shop'@'localhost' IDENTIFIED BY 'new';/);
 });
 
 test("a server with only MariaDB's client names is still usable", async () => {

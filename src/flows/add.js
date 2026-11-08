@@ -6,7 +6,7 @@ import { runBackup } from "./backup.js";
 import { detectApp, dirStats, fileCandidates, findApps, formatBytes, suggestName } from "../detect.js";
 import { readDatabaseSettings } from "../envfile.js";
 import { basename } from "node:path";
-import { backupUserSql, clientFlavor, generatePassword, mysqlClient, routinesWarning } from "../mysql.js";
+import { backupUserName, backupUserSql, clientFlavor, generatePassword, mysqlClient, routinesWarning } from "../mysql.js";
 import { paths } from "../paths.js";
 import { discardDatabase, prepareDatabase, saveProject, validateAppDir, validateFolders, validateName } from "../projects.js";
 import { UserError, bold, dim, info, ok, red, warn, yellow } from "../ui.js";
@@ -131,7 +131,7 @@ async function askDatabase(ask, { app, name, p }) {
 
     let settings;
     try {
-      if (method === "backup-user") settings = await backupUserSetup(ask);
+      if (method === "backup-user") settings = await backupUserSetup(ask, name);
       if (method === "env") {
         settings = await readDatabaseSettings(app.envFile);
         info(dim(`Read from .env: ${settings.database} @ ${settings.socket ?? `${settings.host}:${settings.port}`} as ${settings.username} (password hidden)`));
@@ -151,15 +151,16 @@ async function askDatabase(ask, { app, name, p }) {
   }
 }
 
-async function backupUserSetup(ask) {
+async function backupUserSetup(ask, app) {
   const database = (await ask.input({ message: "Database name (the app's DB_DATABASE)", required: true })).trim();
   const password = generatePassword();
+  const username = backupUserName(app);
   info(`
 Run this as a MySQL admin (on most servers: ${bold(`sudo ${basename(mysqlClient())}`)}):
 
-${backupUserSql({ database, password, flavor: await clientFlavor() })}
+${backupUserSql({ database, username, password, flavor: await clientFlavor() })}
 
-${dim("It can read the database (all mysqldump needs) but can't change anything.")}
+${dim("It can read the database (all mysqldump needs) but can't change your data: no INSERT, UPDATE, DELETE or DROP TABLE.")}
 ${dim("The password was generated just now; Agouti will store it, you don't need to.")}
 `);
   const done = await ask.select({
@@ -170,7 +171,7 @@ ${dim("The password was generated just now; Agouti will store it, you don't need
     ],
   });
   if (done === "back") return null;
-  return { host: "localhost", port: 3306, database, username: "agouti_backup", password };
+  return { host: "localhost", port: 3306, database, username, password };
 }
 
 async function askConnection(ask, prev) {

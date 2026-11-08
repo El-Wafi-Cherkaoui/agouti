@@ -103,7 +103,7 @@ test("read-only backup user: SQL shown, failed connection fixed in place", async
     ["input", /Host/, (o) => (assert.equal(o.default, "localhost"), "localhost")],
     ["input", /Port/, "3306"],
     ["input", /Database name/, (o) => o.default],
-    ["input", /Username/, (o) => (assert.equal(o.default, "agouti_backup"), o.default)],
+    ["input", /Username/, (o) => (assert.equal(o.default, "agouti_shop", "one backup user per app"), o.default)],
     ["password", /leave empty to keep/, ""],
     ["checkbox", /Which folders/, ["storage/app/public"]],
     ["input", /Other folders/, ""],
@@ -126,12 +126,12 @@ test("read-only backup user: SQL shown, failed connection fixed in place", async
     process.env.AGOUTI_MYSQL = orig;
   }
   assert.deepEqual(ask.remaining, []);
-  assert.match(out, /CREATE USER 'agouti_backup'@'localhost' IDENTIFIED BY '([^']+)'/);
+  assert.match(out, /CREATE USER IF NOT EXISTS 'agouti_shop'@'localhost' IDENTIFIED BY '([^']+)';\nALTER USER 'agouti_shop'@'localhost' IDENTIFIED BY '\1';/, "running it again updates the user");
   const generated = out.match(/IDENTIFIED BY '([^']+)'/)[1];
   assert.match(out, /Couldn't connect: ERROR 1045/);
 
   const project = (await loadConfig(p)).projects.shop;
-  assert.equal(project.database.user, "agouti_backup");
+  assert.equal(project.database.user, "agouti_shop");
   assert.equal(project.database.source, "manual");
   assert.match(await readFile(project.database.credentials, "utf8"), new RegExp(`password="${generated}"`), "kept the generated password");
 });
