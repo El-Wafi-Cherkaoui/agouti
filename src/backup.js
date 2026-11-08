@@ -27,6 +27,14 @@ export async function backupApps(names = [], { p = paths(), onEvent = () => {}, 
   if (unknown.length) throw new UserError(`Unknown app: ${unknown.join(", ")}`, `Apps: ${all.join(", ")}`);
   const selected = names.length ? [...new Set(names)] : all;
 
+  // Ctrl-C reaches restic too (same terminal), which stops and removes its lock.
+  // Catch it here, so the backup ends with what was and wasn't saved, and the
+  // attempt is recorded. A second Ctrl-C quits at once.
+  let stopped = false;
+  const onInt = () => {
+    if (stopped) process.exit(130);
+    stopped = true;
+  };
   const release = lock ? await acquireLock(p) : async () => {};
   try {
     // Seconds, not half an hour of restic retrying, when the drive is unplugged.
@@ -36,19 +44,22 @@ export async function backupApps(names = [], { p = paths(), onEvent = () => {}, 
     const env = await resticEnv(config, p);
     const results = [];
     const safety = tags.includes("kind=safety");
+    if (!safety) process.on("SIGINT", onInt);
     const state = await loadState(p);
     for (const name of selected) {
       const s = state.projects[name];
       const baseline = safety ? undefined : (s?.baseline ?? baselineOf(s?.lastSuccess));
       const replacing = safety ? undefined : s?.replacing;
-      const result = await backupApp(name, config.projects[name], { bin, env, onEvent, extraTags: tags, baseline, replacing });
+      const result = await backupApp(name, config.projects[name], { bin, env, onEvent, extraTags: tags, baseline, replacing, isStopped: () => stopped });
       // A point saved before a restore isn't a backup: counted as one, the status would
       // say "backed up 5 min ago" while real backups had stopped days ago.
       if (!safety) await recordBackup(name, result, p);
       results.push(result);
+      if (stopped) break; // the other apps aren't started
     }
     return results;
   } finally {
+    process.off("SIGINT", onInt);
     await release();
   }
 }
@@ -74,7 +85,7 @@ export function pointId(date = new Date()) {
     .replace(/\.\d+Z$/, "Z");
 }
 
-async function backupApp(name, project, { bin, env, onEvent, extraTags = [], baseline, replacing }) {
+async function backupApp(name, project, { bin, env, onEvent, extraTags = [], baseline, replacing, isStopped = () => false }) {
   const started = new Date();
   const point = pointId(started);
   const tags = ["agouti", `app=${name}`, `point=${point}`, ...extraTags];
@@ -99,7 +110,7 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [], bas
       return { ok: false, error, hint: databaseHint(error, project) };
     }
     return { ok: true, snapshot: r.summary.snapshot_id, bytes: r.summary.total_bytes_processed, added: r.summary.data_added };
-  });
+  }, isStopped);
 
   // Files: only what changed since last time is uploaded (restic deduplicates).
   const files = await part(name, "files", onEvent, async (progress) => {
@@ -136,12 +147,12 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [], bas
       ...(unreadable.length ? { unreadable: unreadableText(unreadable) } : {}),
       ...(warnings.length ? { warning: warnings.join(" ") } : {}),
     };
-  });
+  }, isStopped);
 
   // What a new server needs to restore this app after this one is lost: where it
   // lived and what to back up. Never credentials.
   let described = { ok: true };
-  if (database.ok || files.ok) {
+  if ((database.ok || files.ok) && !isStopped()) {
     const r = await run(bin, [...common, "--tag", [...tags, "part=app"].join(","), "--stdin", "--stdin-filename", APP_FILE], {
       env,
       stdin: JSON.stringify(appDescription(name, project), null, 2) + "\n",
@@ -159,6 +170,7 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [], bas
     files,
     ...(described.ok ? {} : { warning: `The app's description wasn't saved (${described.error}); a new server couldn't find this app.` }),
   };
+  if (isStopped()) result.stopped = true;
   const shrunk = shrinkage(baseline, result);
   if (shrunk) result.shrunk = shrunk;
   if (replacing) result.halfRestored = `${replaceText(replacing)}, so this backup may hold half-restored data.`;
@@ -199,8 +211,13 @@ function unreadableText(errors) {
 
 // Runs one part, timing it and turning unexpected errors into a failed part, so
 // one failure never stops the other part or the other apps from being backed up.
-async function part(app, name, onEvent, fn) {
+async function part(app, name, onEvent, fn, isStopped = () => false) {
   const started = Date.now();
+  if (isStopped()) {
+    const r = { ok: false, error: "not started: the backup was stopped with Ctrl-C", seconds: 0 };
+    onEvent({ type: "part-done", app, part: name, result: r });
+    return r;
+  }
   onEvent({ type: "part-start", app, part: name });
   let r;
   try {
@@ -212,6 +229,8 @@ async function part(app, name, onEvent, fn) {
   } catch (err) {
     r = { ok: false, error: err instanceof UserError ? err.message : String(err?.message ?? err) };
   }
+  // Cut off by Ctrl-C: restic's own wording ("interrupted", exit codes) says less.
+  if (!r.ok && isStopped()) r = { ok: false, error: "stopped with Ctrl-C before it finished" };
   r.seconds = Math.round((Date.now() - started) / 100) / 10;
   onEvent({ type: "part-done", app, part: name, result: r });
   return r;
@@ -221,6 +240,7 @@ async function part(app, name, onEvent, fn) {
 // one (e.g. "Access denied"), otherwise restic's. restic writes its own errors to
 // stderr as JSON, and prefixes a subprocess's stderr with "subprocess <name>: ".
 export function describeFailure(r, tool) {
+  if (r.code === null && r.signal) return `the backup program was stopped (${r.signal}) before it finished`;
   const text = [];
   const json = [...r.messages];
   for (const line of r.stderr

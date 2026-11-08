@@ -17,9 +17,11 @@ import { runVerify } from "../src/flows/verify.js";
 import { paths } from "../src/paths.js";
 import { ensureRestic, resticEnv } from "../src/restic.js";
 import { applyRetention } from "../src/retention.js";
-import { acceptChange, flaggedChanges, loadState, recordBackup } from "../src/state.js";
+import { acceptChange, flaggedChanges, flaggedPoints, loadState, recordBackup } from "../src/state.js";
 import { app } from "../src/app.js";
 import { repositoryStatus } from "../src/repository.js";
+import { listPoints, newestBackup } from "../src/restore.js";
+import { printPoints } from "../src/flows/restore.js";
 import { sameServer, setupVerifier, throwawayName, verifyDue } from "../src/verify.js";
 import { captured, installFakeMysql, laravelFixture, scripted } from "./helpers.js";
 
@@ -452,4 +454,56 @@ test("storage unplugged: the backup stops in seconds and says so, also on a sche
   }
   const [back] = await backupApps([], { p });
   assert.equal(back.ok, true, "plugged back in: works again");
+});
+
+test("flagged backups are marked in the lists, and latest skips them until the change is accepted", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p } = await setup();
+  await writeFile(process.env.FAKE_DUMP, dumpWith(300000));
+  const [good] = await backupApps([], { p });
+  await new Promise((res) => setTimeout(res, 1100));
+  await writeFile(process.env.FAKE_DUMP, dumpWith(10));
+  const [bad] = await backupApps([], { p });
+  assert.ok(bad.shrunk);
+
+  const env = await resticEnv(await loadConfig(p), p);
+  const list = async () => listPoints("shop", { bin: restic, env, flagged: await flaggedPoints("shop", p) });
+  let points = await list();
+  assert.equal(points.find((pt) => pt.id === bad.point).flagged, "shrank");
+  assert.equal(newestBackup(points).id, good.point, "latest is the last normal backup");
+  const out = await captured(() => printPoints("shop", points));
+  assert.match(out, new RegExp(`${bad.point} .*⚠ data shrank sharply`));
+  assert.doesNotMatch(out.split("\n").find((l) => l.includes(good.point)), /⚠/);
+
+  await acceptChange("shop", p);
+  points = await list();
+  assert.equal(points.find((pt) => pt.id === bad.point).flagged, null, "accepted: a normal point again");
+  assert.equal(newestBackup(points).id, bad.point);
+});
+
+test("Ctrl-C during a backup: it says what was and wasn't saved, records the attempt, and starts nothing more", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p } = await setup();
+  await backupApps([], { p });
+  let r;
+  const out = await captured(async () => {
+    [r] = await backupApps([], {
+      p,
+      onEvent: (e) => {
+        if (e.type === "part-start" && e.part === "database") setImmediate(() => process.emit("SIGINT"));
+      },
+    });
+  });
+  assert.equal(r.stopped, true);
+  assert.equal(r.ok, false);
+  assert.equal(r.files.error, "not started: the backup was stopped with Ctrl-C");
+  const state = await loadState(p);
+  assert.equal(state.projects.shop.lastBackup.ok, false, "the attempt is on record: the status shows it");
+  assert.equal(process.listenerCount("SIGINT"), 0, "Ctrl-C works normally again afterwards");
+  void out;
+});
+
+test("a backup program killed mid-run is described as such, not as 'exit code null'", async () => {
+  const { describeFailure } = await import("../src/backup.js");
+  assert.equal(describeFailure({ code: null, signal: "SIGKILL", messages: [], stderr: "" }, "restic"), "the backup program was stopped (SIGKILL) before it finished");
 });

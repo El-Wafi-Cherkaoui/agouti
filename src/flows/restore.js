@@ -9,6 +9,7 @@ import { paths } from "../paths.js";
 import { adminConnection, copyDatabaseName, discoverApps, findFiles, listPoints, newestBackup, restoreApp, restoreFilesByPath } from "../restore.js";
 import { bringBack, describeFound } from "./adopt.js";
 import { clearLaravelCache } from "../laravel.js";
+import { flaggedPoints } from "../state.js";
 import { ensureRestic, resticEnv } from "../restic.js";
 import { UserError, bold, dim, green, info, red, shellQuote, warn, yellow } from "../ui.js";
 
@@ -33,7 +34,7 @@ export async function restoreFlow(ask, { p = paths(), app } = {}) {
   const project = config.projects[app];
   if (!project) throw new UserError(`Unknown app: ${app}`, `Apps: ${[...apps, ...elsewhere.map((a) => a.name)].join(", ") || "none"}`);
 
-  const points = await listPoints(app, { bin, env });
+  const points = await listPoints(app, { bin, env, flagged: await flaggedPoints(app, p) });
   if (!points.length) throw new UserError(`${app} has no restore points yet.`, `Make one first: "Back up now", or sudo agouti backup ${app}`);
 
   const newest = newestBackup(points);
@@ -100,8 +101,12 @@ export function pointLabel(pt, latest = false) {
   const when = `${pt.at.replace("T", " ").slice(0, 16)} UTC`;
   const parts = pt.database && pt.files ? "database + files" : pt.database ? yellow("database only") : yellow("files only");
   const notes = [latest && "latest", pt.safety && "saved before a restore"].filter(Boolean);
-  return `${when}  ${dim(ago(pt.at).padEnd(11))} ${parts}${notes.length ? dim(`  (${notes.join(", ")})`) : ""}`;
+  return `${when}  ${dim(ago(pt.at).padEnd(11))} ${parts}${notes.length ? dim(`  (${notes.join(", ")})`) : ""}${flagNote(pt)}`;
 }
+
+export // Suspect data: the backup shrank sharply, or was taken during an unfinished replace.
+const FLAGS = { shrank: "data shrank sharply", "half-restored": "taken during an unfinished replace" };
+const flagNote = (pt) => (pt.flagged ? `  ${yellow(`⚠ ${FLAGS[pt.flagged] ?? pt.flagged}`)}` : "");
 
 export function pointDetails(pt) {
   const bits = [];
@@ -284,6 +289,6 @@ export function printPoints(app, points) {
   info(dim(`  ${"POINT".padEnd(18)}${"WHEN (UTC)".padEnd(18)}CONTENTS`));
   for (const pt of points) {
     const parts = pt.database && pt.files ? "database + files" : pt.database ? "database only" : "files only";
-    info(`  ${pt.id.padEnd(18)}${pt.at.replace("T", " ").slice(0, 16).padEnd(18)}${parts}${pt.safety ? "  (saved before a restore)" : ""}`);
+    info(`  ${pt.id.padEnd(18)}${pt.at.replace("T", " ").slice(0, 16).padEnd(18)}${parts}${pt.safety ? "  (saved before a restore)" : ""}${flagNote(pt)}`);
   }
 }

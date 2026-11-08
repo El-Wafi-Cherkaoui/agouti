@@ -185,7 +185,7 @@ export function runJson(bin, args, { env = process.env, onMessage = () => {} } =
     });
     child.stderr.on("data", (d) => (stderr += d));
     child.on("error", reject);
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       // restic writes per-file errors ("error" messages) to stderr, even with --json.
       const errors = [];
       for (const line of stderr.split("\n")) {
@@ -197,7 +197,7 @@ export function runJson(bin, args, { env = process.env, onMessage = () => {} } =
           // A subprocess's own output, not a message from restic.
         }
       }
-      resolve({ code, messages, errors, stderr, summary: messages.findLast((m) => m.message_type === "summary") });
+      resolve({ code, signal, messages, errors, stderr, summary: messages.findLast((m) => m.message_type === "summary") });
     });
   });
 }

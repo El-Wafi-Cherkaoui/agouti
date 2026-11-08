@@ -17,12 +17,13 @@ import { requireConfig, writeAtomic } from "./config.js";
 import { id, mysqlClient, optionFileContent, query, str } from "./mysql.js";
 import { paths } from "./paths.js";
 import { ensureRestic, resticEnv, run, runJson } from "./restic.js";
-import { acquireLock, lockFile, recordReplace } from "./state.js";
+import { acquireLock, flaggedPoints, lockFile, recordReplace } from "./state.js";
 import { UserError } from "./ui.js";
 
 // Restore points of one app, newest first:
 // [{ id, at, database: { snapshot, path, bytes } | null, files: { snapshot, paths, files, bytes } | null }]
-export async function listPoints(app, { bin, env }) {
+// flagged: { pointId: reason } from this server's state (see flaggedPoints).
+export async function listPoints(app, { bin, env, flagged = {} }) {
   const r = await run(bin, ["snapshots", "--json", "--tag", `agouti,app=${app}`], { env });
   if (r.code !== 0) throw new UserError(`Couldn't list restore points: ${cleanRestic(r.stderr)}`);
   const points = new Map();
@@ -30,7 +31,7 @@ export async function listPoints(app, { bin, env }) {
     const tag = (name) => s.tags?.find((t) => t.startsWith(`${name}=`))?.slice(name.length + 1);
     const point = tag("point");
     if (!point) continue;
-    const pt = points.get(point) ?? { id: point, at: s.time, database: null, files: null, safety: s.tags.includes("kind=safety") };
+    const pt = points.get(point) ?? { id: point, at: s.time, database: null, files: null, safety: s.tags.includes("kind=safety"), flagged: flagged[point] ?? null };
     if (s.time < pt.at) pt.at = s.time;
     const sum = s.summary ?? {};
     if (tag("part") === "database") pt.database = { snapshot: s.id, path: s.paths[0], bytes: sum.total_bytes_processed };
@@ -43,8 +44,10 @@ export async function listPoints(app, { bin, env }) {
 // What "latest" means: the newest real backup that has every part asked for. Not a
 // point saved before a restore (it may hold the very damage being undone), and not
 // one whose database or files failed.
+// Nor one flagged as holding suspect data (it shrank sharply, or was taken during an
+// unfinished replace).
 export function newestBackup(points, parts = ["database", "files"]) {
-  return points.find((pt) => !pt.safety && parts.every((part) => pt[part]));
+  return points.find((pt) => !pt.safety && !pt.flagged && parts.every((part) => pt[part]));
 }
 
 // Apps that have backups in the repository, from their latest description (see
@@ -205,11 +208,11 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
   try {
     const bin = await ensureRestic({ p, log });
     const env = await resticEnv(config, p);
-    const points = await listPoints(app, { bin, env });
+    const points = await listPoints(app, { bin, env, flagged: await flaggedPoints(app, p) });
     if (!points.length) throw new UserError(`${app} has no restore points yet.`, `Make one: sudo agouti backup ${app}`);
     const latest = !opts.point || opts.point === "latest";
     const point = latest ? newestBackup(points, parts) : points.find((pt) => pt.id === opts.point);
-    if (!point && latest) throw new UserError(`No backup of ${app} has ${parts.join(" and ")}: every one is incomplete.`, `See them: sudo agouti restore ${app} --list`);
+    if (!point && latest) throw new UserError(`No backup of ${app} has ${parts.join(" and ")} and looks normal: each one is incomplete or flagged.`, `See them: sudo agouti restore ${app} --list`);
     if (!point) throw new UserError(`No restore point ${opts.point} for ${app}.`, `See them: sudo agouti restore ${app} --list`);
     for (const part of parts) {
       if (!point[part]) throw new UserError(`Restore point ${point.id} has no ${part} (that part of the backup failed).`, "Pick another restore point.");
@@ -573,7 +576,7 @@ export async function restoreFilesByPath(app, pointId, filePaths, { p = paths(),
   const project = config.projects[app];
   const bin = await ensureRestic({ p, log });
   const env = await resticEnv(config, p);
-  const points = await listPoints(app, { bin, env });
+  const points = await listPoints(app, { bin, env, flagged: await flaggedPoints(app, p) });
   const point = !pointId || pointId === "latest" ? newestBackup(points, ["files"]) : points.find((pt) => pt.id === pointId);
   if (!point?.files)
     throw new UserError(pointId && pointId !== "latest" ? `No files in restore point ${pointId} of ${app}.` : `${app} has no files backed up yet.`);

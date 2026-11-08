@@ -4,6 +4,7 @@ import { printPoints, restoreFlow, runRestore } from "../flows/restore.js";
 import { paths } from "../paths.js";
 import { defaultAsk } from "../prompts.js";
 import { listPoints, restoreFilesByPath } from "../restore.js";
+import { flaggedPoints } from "../state.js";
 import { ensureRestic, resticEnv } from "../restic.js";
 import { UserError, bold, green, info } from "../ui.js";
 
@@ -62,7 +63,7 @@ export async function restore({ positionals, values }, { ask = defaultAsk, p = p
 
   if (values.list) {
     const bin = await ensureRestic({ p, log: info });
-    return printPoints(app, await listPoints(app, { bin, env: await resticEnv(config, p) }));
+    return printPoints(app, await listPoints(app, { bin, env: await resticEnv(config, p), flagged: await flaggedPoints(app, p) }));
   }
 
   if (values.file) {

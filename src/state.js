@@ -29,6 +29,9 @@ export async function recordBackup(name, result, p = paths()) {
   const state = await loadState(p);
   const prev = state.projects[name] ?? {};
   const next = { ...prev, lastBackup: result, lastSuccess: result.ok ? result : prev.lastSuccess };
+  // Which points hold suspect data, so lists can mark them and "latest" skips them.
+  const kind = result.halfRestored ? "half-restored" : result.shrunk ? "shrank" : null;
+  if (kind) next.flagged = { ...prev.flagged, [result.point]: kind };
   if (result.shrunk) {
     next.shrunk = { since: prev.shrunk?.since ?? result.at, point: result.point, text: result.shrunk };
     // Keep what it was compared with. State written before baselines existed has
@@ -65,6 +68,8 @@ export async function acceptChange(name, p = paths()) {
   const next = { ...prev };
   if (prev.lastSuccess) next.baseline = baselineOf(prev.lastSuccess);
   delete next.shrunk;
+  // The smaller data was intended: those points are normal ones after all.
+  next.flagged = Object.fromEntries(Object.entries(prev.flagged ?? {}).filter(([, k]) => k !== "shrank"));
   if (prev.lastVerify?.status === "warning") {
     next.lastVerify = { ...prev.lastVerify, status: "verified", accepted: new Date().toISOString() };
     next.verifyReference = next.lastVerify;
@@ -137,4 +142,9 @@ function isAlive(pid) {
   } catch (err) {
     return err.code === "EPERM";
   }
+}
+
+// { pointId: "shrank" | "half-restored" } for one app.
+export async function flaggedPoints(app, p = paths()) {
+  return (await loadState(p)).projects[app]?.flagged ?? {};
 }

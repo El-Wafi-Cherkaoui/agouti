@@ -205,7 +205,7 @@ function reporter(live) {
       const r = e.result;
       const when = r.at.replace("T", " ").slice(0, 16);
       if (r.ok) info(`${green("✓")} Restore point ${bold(`${r.app} @ ${when}`)} ${dim("(UTC)")}`);
-      else info(`${red("✕")} ${bold(r.app)}: backup incomplete. ${savedParts(r)}`);
+      else info(`${red("✕")} ${bold(r.app)}: ${r.stopped ? "backup stopped with Ctrl-C" : "backup incomplete"}. ${savedParts(r)}`);
       if (r.warning) info(`  ${yellow("⚠")} ${r.warning}`);
       if (r.shrunk) info(`${yellow("⚠")} ${bold(r.app)}: ${r.shrunk}`);
       if (r.halfRestored) info(`${yellow("⚠")} ${bold(r.app)}: ${r.halfRestored}`);
