@@ -69,3 +69,37 @@ test("local storage on the system disk is flagged, other disks and remote storag
   assert.equal(localDiskWarning("s3:https://s3.eu-west-1.amazonaws.com/b"), null);
   assert.equal(localDiskWarning("sftp:u@h:/srv/b"), null);
 });
+
+test("shellQuote: printed commands read back exactly, whatever the file name", async () => {
+  const { shellQuote } = await import("../src/ui.js");
+  const { execFileSync } = await import("node:child_process");
+  const names = ["/srv/shop/storage/app/a.pdf", "it's.pdf", "x'; rm -rf / #.pdf", "$(id) `id` $HOME.pdf", "new\nline.pdf", "esc\x1b[31mred.pdf", "back\\slash.pdf", "été ünïcode.pdf"];
+  for (const name of names) {
+    const q = shellQuote(name);
+    assert.equal(execFileSync("bash", ["-c", `printf %s ${q}`]).toString(), name, q);
+    assert.doesNotMatch(q, /[\x00-\x1f\x7f]/, "no raw control characters reach the terminal");
+  }
+});
+
+test("suggested commands work under sudo: the full command when sudo can't find agouti (nvm, a git checkout)", async () => {
+  const { setAgoutiCommand, withCommand, UserError } = await import("../src/ui.js");
+  const { mkdtemp, writeFile, symlink, mkdir } = await import("node:fs/promises");
+  const root = await mkdtemp(join(tmpdir(), "agouti-cmd-"));
+  const script = join(root, "nvm dir/agouti.js");
+  await mkdir(join(root, "nvm dir"));
+  await writeFile(script, "");
+  try {
+    // Not where sudo looks: the full command, quoted.
+    assert.equal(setAgoutiCommand(script, { node: process.execPath, dirs: [join(root, "bin")] }), `sudo ${process.execPath} '${script}'`);
+    assert.equal(withCommand("See them: sudo agouti restore shop --list"), `See them: sudo ${process.execPath} '${script}' restore shop --list`);
+    assert.match(new UserError("x", "Run `sudo agouti verify --setup`").hint, /^Run `sudo .*agouti\.js' verify --setup`$/);
+    // Installed where sudo looks (agouti and node both on its path): kept short.
+    await mkdir(join(root, "bin"));
+    await symlink(script, join(root, "bin/agouti"));
+    await symlink(process.execPath, join(root, "bin/node"));
+    assert.equal(setAgoutiCommand(script, { node: process.execPath, dirs: [join(root, "bin")] }), "sudo agouti");
+    assert.equal(withCommand("sudo agouti verify"), "sudo agouti verify");
+  } finally {
+    setAgoutiCommand(script, { node: process.execPath, dirs: [join(root, "bin")] }); // short form: leaves other tests' text alone
+  }
+});

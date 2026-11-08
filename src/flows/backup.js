@@ -13,7 +13,7 @@ import { CHANNELS, loadAlerts, sendAlert } from "../alerts.js";
 import { hostname } from "node:os";
 import { verifyDue } from "../verify.js";
 import { runVerify, verifySummary } from "./verify.js";
-import { bold, dim, green, info, red, warn, yellow } from "../ui.js";
+import { bold, dim, green, info, red, warn, withCommand, yellow } from "../ui.js";
 
 export async function runBackup(names = [], { p = paths(), live = process.stdout.isTTY } = {}) {
   const results = await backupApps(names, { p, log: info, onEvent: reporter(live) });
@@ -37,7 +37,7 @@ export async function scheduledBackup(names = [], { p = paths() } = {}) {
   if (url) await ping(url, "start");
   const report = []; // everything, for the healthcheck
   const problems = []; // what went wrong and what to do, for the alerts
-  const fail = (line, ...detail) => problems.push(line, ...detail.filter(Boolean).map((d) => `  ${d}`));
+  const fail = (line, ...detail) => problems.push(withCommand(line), ...detail.filter(Boolean).map((d) => `  ${withCommand(d)}`));
   let ok = false;
   try {
     const results = await runBackup(names, { p, live: false });

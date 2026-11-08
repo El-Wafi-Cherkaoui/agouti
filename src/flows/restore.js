@@ -10,7 +10,7 @@ import { adminConnection, copyDatabaseName, discoverApps, findFiles, listPoints,
 import { bringBack, describeFound } from "./adopt.js";
 import { clearLaravelCache } from "../laravel.js";
 import { ensureRestic, resticEnv } from "../restic.js";
-import { UserError, bold, dim, green, info, red, warn, yellow } from "../ui.js";
+import { UserError, bold, dim, green, info, red, shellQuote, warn, yellow } from "../ui.js";
 
 export async function restoreFlow(ask, { p = paths(), app } = {}) {
   const config = await requireConfig(p);
@@ -186,7 +186,7 @@ async function singleFile(ask, { app, project, point, bin, env, p }) {
     if (!choice) continue;
     const [restored] = await restoreFilesByPath(app, point.id, [choice], { p });
     info(`${green("✓")} Restored to ${bold(restored)}`);
-    info(dim(`The live file was not touched. To put it back:\n  cp -a '${restored}' '${choice}'`));
+    info(dim(`The live file was not touched. To put it back:\n  sudo cp -a ${shellQuote(restored)} ${shellQuote(choice)}`));
     return;
   }
 }
@@ -270,7 +270,7 @@ function nextSteps(r) {
       lines.push(`Look at the database: ${basename(mysqlClient())} ${r.database.database}`);
       lines.push(`Drop it when you're done: DROP DATABASE \`${r.database.database}\`;`);
     }
-    if (r.files?.ok) lines.push(`Copy back what you need from ${r.files.path} (cp -a keeps owners), then delete it.`);
+    if (r.files?.ok) lines.push(`Copy back what you need from ${r.files.path} (sudo cp -a keeps owners), then delete it.`);
   } else if (r.mode === "replace") {
     if (r.safety?.ok) lines.push(`To undo: sudo agouti restore ${r.app} --point ${r.safety.point} --replace`);
     if (r.ok && r.framework !== "laravel") lines.push("Clear the app's caches if it has any, then bring it back up.");

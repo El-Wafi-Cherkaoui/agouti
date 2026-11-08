@@ -617,7 +617,8 @@ test("agouti connect lists the apps found in the backups", async (t) => {
   const r = spawnSync(process.execPath, [BIN, "connect", old.config.repository, "--recovery-key", "agouti-rk-TEST"], { env, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /Found 1 app in the backups:\n  shop .* database shop_prod · last backup just now/);
-  assert.match(r.stdout, /sudo agouti → Restore/);
+  // "sudo agouti", or the full command where sudo can't find agouti (#11), as here and in CI.
+  assert.match(r.stdout, /sudo (agouti|\S+ \S+\/bin\/agouti\.js) → Restore/);
 });
 
 test("a throwaway database never gets the dump's events, in the form mysqldump writes them", async () => {
