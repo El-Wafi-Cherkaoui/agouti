@@ -139,8 +139,13 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [], bas
     }
     // A file deleted while the backup ran isn't missing from anything; one that can't be read is.
     const unreadable = r.errors.filter((m) => !/no such file or directory/i.test(m.error?.message ?? ""));
+    // Without disk snapshots, a file written to while it was read is saved as it was
+    // at that moment: possibly cut short (an upload still arriving). Its modification
+    // time, later than the backup's start, gives it away. The next backup saves it whole.
+    const moving = await changedDuring(bin, env, r.summary.snapshot_id, started);
     const warnings = [
       ...(unreadable.length ? [unreadableText(unreadable)] : []),
+      ...(moving.length ? [`${moving.length} ${moving.length === 1 ? "file was" : "files were"} being written while saved, so ${moving.length === 1 ? "its copy" : "their copies"} may be incomplete: ${moving.slice(0, 3).join(", ")}${moving.length > 3 ? ", ..." : ""}. The next backup saves ${moving.length === 1 ? "it" : "them"} whole.`] : []),
       ...ignored.map((x) => `An exclude rule was ignored, so it left nothing out: ${x}.`),
     ];
     return {
@@ -211,6 +216,23 @@ export function shrinkage(baseline, result) {
   }
   if (!drops.length) return null;
   return `The data shrank sharply: ${drops.join("; ")}${when}. If that wasn't deleted on purpose, check the app now: this backup may hold damaged data, and older restore points are kept until this is resolved.`;
+}
+
+// Files in a snapshot modified after `since` (while the backup ran).
+async function changedDuring(bin, env, snapshot, since) {
+  const r = await run(bin, ["ls", "--json", snapshot], { env });
+  if (r.code !== 0) return [];
+  const out = [];
+  for (const line of r.stdout.split("\n")) {
+    if (!line.includes('"type":"file"')) continue;
+    try {
+      const n = JSON.parse(line);
+      if (n.type === "file" && Date.parse(n.mtime) > since.getTime()) out.push(n.path);
+    } catch {
+      // not a node line
+    }
+  }
+  return out;
 }
 
 // { id, files } of the app's newest files snapshot, or null.

@@ -12,6 +12,7 @@ import { flaggedChanges, loadState, recordScheduled } from "../state.js";
 import { CHANNELS, loadAlerts, sendAlert } from "../alerts.js";
 import { hostname } from "node:os";
 import { verifyDue } from "../verify.js";
+import { unfinishedUploads } from "../repository.js";
 import { runVerify, verifySummary } from "./verify.js";
 import { bold, dim, green, info, localNote, red, warn, withCommand, yellow } from "../ui.js";
 
@@ -100,6 +101,12 @@ export async function scheduledBackup(names = [], { p = paths() } = {}) {
         }
         const kept = await applyRetention(config, { bin, env: await resticEnv(config, p), policy, log: info, hold });
         const deleted = Object.values(kept.apps).reduce((n, a) => n + a.deleted, 0);
+        const leftovers = await unfinishedUploads(config).catch(() => ({ files: 0 }));
+        if (leftovers.files) {
+          const l = `Removed ${leftovers.files} unfinished ${leftovers.files === 1 ? "upload" : "uploads"} (${formatBytes(leftovers.bytes)}) left by an interrupted backup`;
+          info(dim(l));
+          report.push(l);
+        }
         const line = `Retention (${policy.daily} daily, ${policy.weekly} weekly, ${policy.monthly} monthly): ${deleted ? `deleted ${deleted} old restore ${deleted === 1 ? "point" : "points"}` : "nothing to delete"}`;
         info(`${green("✓")} ${line}`);
         report.push(line);

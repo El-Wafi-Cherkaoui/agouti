@@ -14,11 +14,12 @@ import { replaceText } from "./backup.js";
 import { verifyFlow, verifyLabel } from "./flows/verify.js";
 import { printStatus, scheduleFlow } from "./flows/schedule.js";
 import { loadConfig } from "./config.js";
+import { formatBytes } from "./detect.js";
 import { loadHealthcheck } from "./healthcheck.js";
 import { paths } from "./paths.js";
 import { askRecoveryKey, askStorage, defaultAsk } from "./prompts.js";
 import { normalizeRecoveryKey } from "./recovery-key.js";
-import { connectRepository, createRepository, repositoryStatus } from "./repository.js";
+import { connectRepository, createRepository, repositoryStatus, unfinishedUploads } from "./repository.js";
 import { acceptChange, flaggedChanges, loadState, recordReplace } from "./state.js";
 import { scheduleStatus } from "./schedule.js";
 import { describeRepository } from "./storage.js";
@@ -286,6 +287,8 @@ async function checkStorage(config, p) {
   const s = await repositoryStatus(config, { p, log: info });
   if (!s.reachable) throw new UserError(s.message, s.hint);
   ok(`Storage reachable · ${s.snapshots} restore ${s.snapshots === 1 ? "point" : "points"}`);
+  const left = await unfinishedUploads(config, { dryRun: true });
+  if (left.files) info(dim(`  ${left.files} unfinished ${left.files === 1 ? "upload" : "uploads"} (${formatBytes(left.bytes)}) left by an interrupted backup: the next scheduled backup removes ${left.files === 1 ? "it" : "them"}.`));
 }
 
 async function showKey(ask, p) {

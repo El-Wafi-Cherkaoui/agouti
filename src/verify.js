@@ -274,7 +274,7 @@ async function verifyFiles(app, point, { bin, env, p }) {
   await rm(tmp, { recursive: true, force: true });
   await mkdir(tmp, { recursive: true, mode: 0o700 });
   try {
-    const r = await run(bin, ["restore", point.files.snapshot, "--target", tmp, ...sample.flatMap((n) => ["--include", includePattern(n.path)])], { env });
+    const r = await run(bin, ["restore", point.files.snapshot, "--target", tmp, "--sparse", ...sample.flatMap((n) => ["--include", includePattern(n.path)])], { env });
     if (r.code !== 0) return { ok: false, error: `Restoring a sample of files failed: ${lastLine(r.stderr)}` };
     let compared = 0;
     const bad = [];

@@ -19,7 +19,7 @@ import { ensureRestic, resticEnv } from "../src/restic.js";
 import { applyRetention } from "../src/retention.js";
 import { acceptChange, flaggedChanges, flaggedPoints, loadState, recordBackup } from "../src/state.js";
 import { app } from "../src/app.js";
-import { repositoryStatus } from "../src/repository.js";
+import { repositoryStatus, unfinishedUploads } from "../src/repository.js";
 import { listPoints, newestBackup } from "../src/restore.js";
 import { printPoints } from "../src/flows/restore.js";
 import { sameServer, setupVerifier, throwawayName, verifyDue } from "../src/verify.js";
@@ -521,4 +521,42 @@ test("the restore test samples awkward names without false alarms (not valid UTF
   assert.equal(r.apps[0].files.ok, true, out);
   assert.equal(r.apps[0].files.sampled, 4, "every file is in the sample here");
   assert.equal(r.apps[0].files.compared, 4, "and each compared byte for byte with the live one");
+});
+
+test("unfinished uploads left by an interrupted backup are removed on scheduled runs; recent ones and real data stay", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p, repo } = await setup();
+  await backupApps([], { p });
+  const sub = join(repo, "data", "ab");
+  await mkdir(sub, { recursive: true });
+  const old = join(sub, `${"ab".padEnd(64, "0")}-tmp-12345`);
+  const fresh = join(sub, `${"ab".padEnd(64, "1")}-tmp-678`);
+  const lookalike = join(sub, "ab-tmp-notes.txt"); // not restic's naming
+  for (const f of [old, fresh, lookalike]) await writeFile(f, Buffer.alloc(1000));
+  const hourAgo = new Date(Date.now() - 2 * 3600_000);
+  await utimes(old, hourAgo, hourAgo);
+  await utimes(lookalike, hourAgo, hourAgo);
+
+  const config = await loadConfig(p);
+  assert.deepEqual(await unfinishedUploads(config, { dryRun: true }), { files: 1, bytes: 1000 }, "found, not removed");
+  const out = await captured(() => scheduledBackup([], { p }));
+  assert.match(out, /Removed 1 unfinished upload \(1\.0 KB\) left by an interrupted backup/);
+  assert.equal(existsSync(old), false);
+  assert.ok(existsSync(fresh), "possibly being written right now");
+  assert.ok(existsSync(lookalike), "only restic's own temporary names");
+  assert.equal(spawnSync(restic, ["check"], { env: await resticEnv(config, p) }).status, 0, "the repository is fine");
+});
+
+test("a file written to while it was being backed up is named, since its copy may be incomplete", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p, dir } = await setup();
+  const file = join(dir, "storage/app/private/invoices/88.pdf");
+  const later = new Date(Date.now() + 60_000); // modified after the backup started
+  await utimes(file, later, later);
+  const [r] = await backupApps([], { p });
+  assert.equal(r.ok, true, "the backup itself worked");
+  assert.match(r.files.warning, /1 file was being written while saved, so its copy may be incomplete: .*88\.pdf\. The next backup saves it whole\./);
+  await utimes(file, new Date(), new Date(Date.now() - 1000));
+  const [again] = await backupApps([], { p });
+  assert.equal(again.files.warning, undefined, "nothing written during this one");
 });

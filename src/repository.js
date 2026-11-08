@@ -1,6 +1,6 @@
 // Core repository operations. No prompts and no printing: both the commands and
 // the interactive app call these, so the two can never drift apart.
-import { rm, stat } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { loadConfig, saveConfig, saveCredentials, saveRecoveryKey } from "./config.js";
 import { paths } from "./paths.js";
@@ -102,6 +102,30 @@ function resticReason(stderr) {
   });
   const fatal = lines.find((l) => /^Fatal:/.test(l)) ?? lines.at(-1) ?? "";
   return fatal.replace(/^Fatal:\s*/, "").split("\n")[0].replace(/[.:]\s*$/, "");
+}
+
+// Unfinished uploads: restic writes a data file under a temporary name and renames
+// it when it's complete, so one killed mid-upload (kill -9, a crash, a drive pulled
+// out) leaves "<id>-tmp-<n>" behind. Nothing refers to it, and neither prune nor
+// check removes it. Local storage only; files untouched for an hour, since a backup
+// from another server sharing the storage may be writing one right now.
+// Returns { files, bytes } found (and removed, unless dryRun).
+export async function unfinishedUploads(config, { dryRun = false, olderThan = 3600_000, now = Date.now() } = {}) {
+  const found = { files: 0, bytes: 0 };
+  if (!isLocal(config.repository)) return found;
+  const data = join(config.repository, "data");
+  for (const sub of await readdir(data).catch(() => [])) {
+    for (const name of await readdir(join(data, sub)).catch(() => [])) {
+      if (!/^[0-9a-f]{64}-tmp-\d+$/.test(name)) continue;
+      const file = join(data, sub, name);
+      const s = await stat(file).catch(() => null);
+      if (!s?.isFile() || now - s.mtimeMs < olderThan) continue;
+      if (!dryRun && (await rm(file).then(() => false, () => true))) continue;
+      found.files++;
+      found.bytes += s.size;
+    }
+  }
+  return found;
 }
 
 export async function repositoryStatus(config, { p = paths(), log } = {}) {

@@ -464,7 +464,9 @@ async function restoreFiles(point, project, { bin, env, mode, origin, target, on
       // couldn't write into them. Afterwards they get the owner the backup recorded.
       const created = mode === "new" ? await missingDirs(dest, project.path) : [];
       await mkdir(dest, { recursive: true });
-      const args = ["restore", `${point.files.snapshot}:${folder}`, "--target", dest, ...(mode === "replace" ? ["--delete", ...restoreExcludes(point.files.excludes, folder).flatMap((x) => ["--exclude", x])] : [])];
+      // --sparse: runs of zeros stay holes, so a sparse file (a VM image, a database
+      // file) takes the space it did, not its full size. Contents are identical.
+      const args = ["restore", `${point.files.snapshot}:${folder}`, "--target", dest, "--sparse", ...(mode === "replace" ? ["--delete", ...restoreExcludes(point.files.excludes, folder).flatMap((x) => ["--exclude", x])] : [])];
       const r = await runJson(bin, args, {
         env,
         onMessage: (m) => {
@@ -602,7 +604,7 @@ export async function restoreFilesByPath(app, pointId, filePaths, { p = paths(),
   const inside = filePaths.every((f) => !relative(project.path, f).startsWith(".."));
   const base = inside ? project.path : "/";
   const include = filePaths.flatMap((f) => ["--include", includePattern("/" + relative(base, f))]);
-  const r = await runJson(bin, ["restore", `${point.files.snapshot}:${base}`, "--target", target, ...include], { env });
+  const r = await runJson(bin, ["restore", `${point.files.snapshot}:${base}`, "--target", target, "--sparse", ...include], { env });
   const bad = await markDamaged(target, r.errors);
   if (bad.length) {
     throw new UserError(

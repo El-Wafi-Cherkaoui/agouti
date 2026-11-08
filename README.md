@@ -341,6 +341,8 @@ Agouti handles detection, scheduling, dumps, verification, alerts and restores. 
 
 Storage: Amazon S3, Cloudflare R2, Backblaze B2, MinIO, any S3-compatible service, SFTP, or a local disk.
 
+The database dump is consistent: one transaction, so it's a single moment even while the app writes. Uploaded files are read one by one, without a disk snapshot, so a file still being written when it's read (an upload arriving) is saved as it was at that moment. Agouti names such files in the backup's result, and the next backup saves them whole.
+
 ## What Agouti isn't
 
 Agouti backs up **the apps running on your server**: their databases and their files. It is not a full-server or disk-image backup, a database replication tool, a monitoring system, or a dev-database snapshot tool. v0.1 supports MySQL and MariaDB; Postgres is planned.

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { before, test } from "node:test";
@@ -499,6 +499,23 @@ test("a replace that brings back a file deleted since the last backup: 1 new, no
   const out = await captured(() => runBackup([], { p, live: false }));
   assert.match(out, /✓ files +2 files · .* · 1 new(, \d+ changed)? · /);
   assert.doesNotMatch(out, /removed/);
+});
+
+test("a sparse file is restored sparse, not at its full size", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p, dir } = await setup();
+  const file = join(dir, "storage/app/private/disk.img");
+  const fh = await open(file, "w");
+  await fh.truncate(64 * 1024 * 1024); // 64 MB, all hole
+  await fh.write(Buffer.from("data at the start"), 0, 17, 0);
+  await fh.close();
+  const [b] = await backupApps([], { p });
+  await restoreApp({ app: "shop", point: b.point, parts: ["files"], mode: "copy" }, { p });
+  const restored = join(p.dataDir, "restores", `shop-${b.point}`, "storage/app/private/disk.img");
+  const s = await stat(restored);
+  assert.equal(s.size, 64 * 1024 * 1024);
+  assert.ok(s.blocks * 512 < 4 * 1024 * 1024, `takes ${s.blocks * 512} bytes on disk, not 64 MB`);
+  assert.equal((await readFile(restored)).subarray(0, 17).toString(), "data at the start");
 });
 
 // A second server using the same repository: nothing set up yet.
