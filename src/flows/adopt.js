@@ -25,7 +25,9 @@ export async function appsToBringBack(p) {
 
 export function describeFound(a) {
   const d = a.description;
-  return `${d.path || "?"} · database ${d.database.name} · last backup ${ago(a.at)} on ${a.host}`;
+  const newer = a.completeAt && a.completeAt < a.at ? " (a newer one is incomplete)" : "";
+  const last = a.completeAt ? `last complete backup ${ago(a.completeAt)}${newer}` : "no complete backup";
+  return `${d.path || "?"} · database ${d.database.name} · ${last} on ${a.host}`;
 }
 
 // Right after connecting to an existing repository.
@@ -52,58 +54,58 @@ export async function offerBringBack(ask, { p = paths() } = {}) {
 }
 
 // Restores one app found in the backups onto this server, then sets it up.
+// Every answer can be changed at the summary: the suggestions come from the old
+// server, and Enter accepts them, so a wrong folder or database name must be
+// fixable before anything is restored.
 export async function bringBack(ask, found, { p = paths() } = {}) {
   const d = found.description;
-  info(`\n${bold(found.name)}: last backed up ${ago(found.at)} on ${found.host}`);
+  info(`\n${bold(found.name)}: last complete backup ${ago(found.completeAt ?? found.at)} on ${found.host}`);
   if (d.guessed) warn("These backups predate app descriptions: the folder and database below are Agouti's best guess. Check them.");
 
   // A new server needs both parts. By default the newest real backup that has them:
   // not one saved before a restore, and not one cut short by a failure.
   const parts = d.files?.length ? ["database", "files"] : ["database"];
-  const point = await choosePoint(ask, found.name, parts, p);
+  let point = await choosePoint(ask, found.name, parts, p);
+  let dir = await askDir(ask, found.name, d.path || undefined);
+  let code = await checkCode(ask, dir, found.name);
+  if (code.stop) return;
+  let dbName = await askDbName(ask, d.database.name);
 
-  const dir = (
-    await ask.input({
-      message: `Where should ${found.name} go on this server?`,
-      default: d.path || undefined,
-      validate: (v) => isAbsolute(v.trim()) || "Give an absolute path, e.g. /var/www/shop",
-    })
-  ).trim();
-
-  // `git clone` refuses a folder that isn't empty, so code first, then restore.
-  const codeThere = (await readdir(dir).catch(() => [])).some((e) => e !== "storage");
-  if (!codeThere) {
-    info(`
-${dim(`There's no code in ${dir} yet. Backups hold the database and uploaded files, not the code.`)}
-${dim("Deploying first is easier: `git clone` refuses a folder that isn't empty.")}`);
-    const next = await ask.select({
-      message: "What now?",
-      choices: [
-        { value: "stop", name: "Stop here: I'll deploy the code first, then come back", description: "sudo agouti → Restore" },
-        { value: "go", name: "Restore now anyway", description: "Then clone the code elsewhere and move the restored folders into it." },
-      ],
-    });
-    if (next === "stop") return info(dim(`Deploy the code into ${dir}, then run sudo agouti → Restore → ${found.name}.`));
-  }
-
-  const dbName = (
-    await ask.input({
-      message: "Database name on this server",
-      default: d.database.name,
-      validate: (v) => /^[A-Za-z0-9_$-]{1,64}$/.test(v.trim()) || "Letters, digits, _ and $ only (up to 64).",
-    })
-  ).trim();
   // This server's MySQL, through the local socket unless an admin user says otherwise.
   const project = { path: dir, database: { engine: "mysql", name: dbName, host: "localhost", port: 3306 }, files: d.files };
   const admin = await askAdmin(ask, project, p);
   if (admin.host) Object.assign(project.database, { host: admin.host, port: admin.port });
 
-  info(`
+  for (;;) {
+    Object.assign(project, { path: dir });
+    project.database.name = dbName;
+    info(`
 Agouti will restore ${bold(found.name)} as it was on ${bold(when(point))}:
   · database ${bold(dbName)} on this server (created if needed; must be empty)
   · ${d.files.map((f) => bold(join(dir, f))).join(", ") || "no folders"} (must be empty)
 `);
-  if (!(await ask.confirm({ message: "Go ahead?", default: true }))) return info("Nothing was changed.");
+    const next = await ask.select({
+      message: "Go ahead?",
+      default: "go",
+      choices: [
+        { value: "go", name: "Yes, restore it" },
+        { value: "dir", name: "Change the folder", description: dir },
+        { value: "db", name: "Change the database name", description: dbName },
+        { value: "point", name: "Change the restore point", description: when(point) },
+        { value: "cancel", name: "Cancel", description: "Nothing is changed." },
+      ],
+    });
+    if (next === "go") break;
+    if (next === "cancel") return info("Nothing was changed.");
+    if (next === "point") point = await choosePoint(ask, found.name, parts, p, { current: point, always: true });
+    if (next === "db") dbName = await askDbName(ask, dbName);
+    if (next === "dir") {
+      dir = await askDir(ask, found.name, dir);
+      code = await checkCode(ask, dir, found.name);
+      if (code.stop) return;
+    }
+  }
+  const codeThere = code.there;
 
   const result = await runRestore({ app: found.name, mode: "new", project, origin: d.path, admin, point: point.id, parts }, { p });
   if (!result.ok) return;
@@ -125,8 +127,50 @@ Agouti will restore ${bold(found.name)} as it was on ${bold(when(point))}:
 
 const when = (pt) => `${pt.at.replace("T", " ").slice(0, 16)} UTC`;
 
+async function askDir(ask, app, current) {
+  return (
+    await ask.input({
+      message: `Where should ${app} go on this server?`,
+      default: current,
+      validate: (v) => isAbsolute(v.trim()) || "Give an absolute path, e.g. /var/www/shop",
+    })
+  ).trim();
+}
+
+async function askDbName(ask, current) {
+  return (
+    await ask.input({
+      message: "Database name on this server",
+      default: current,
+      validate: (v) => /^[A-Za-z0-9_$-]{1,64}$/.test(v.trim()) || "Letters, digits, _ and $ only (up to 64).",
+    })
+  ).trim();
+}
+
+// `git clone` refuses a folder that isn't empty, so code first, then restore.
+async function checkCode(ask, dir, app) {
+  const there = (await readdir(dir).catch(() => [])).some((e) => e !== "storage");
+  if (there) return { there };
+  info(`
+${dim(`There's no code in ${dir} yet. Backups hold the database and uploaded files, not the code.`)}
+${dim("Deploying first is easier: `git clone` refuses a folder that isn't empty.")}`);
+  const next = await ask.select({
+    message: "What now?",
+    choices: [
+      { value: "stop", name: "Stop here: I'll deploy the code first, then come back", description: "sudo agouti → Restore" },
+      { value: "go", name: "Restore now anyway", description: "Then clone the code elsewhere and move the restored folders into it." },
+    ],
+  });
+  if (next === "stop") {
+    info(dim(`Deploy the code into ${dir}, then run sudo agouti → Restore → ${app}.`));
+    return { there, stop: true };
+  }
+  return { there };
+}
+
 // Asked only when there's a choice. Incomplete points are listed but can't be picked.
-async function choosePoint(ask, app, parts, p) {
+// current: the point chosen so far (when changing it). always: ask even if there's one.
+async function choosePoint(ask, app, parts, p, { current, always = false } = {}) {
   const config = await requireConfig(p);
   const points = await listPoints(app, { bin: await ensureRestic({ p, log: info }), env: await resticEnv(config, p) });
   const best = newestBackup(points, parts);
@@ -136,12 +180,12 @@ async function choosePoint(ask, app, parts, p) {
       "Check the backups on the old server, if it still runs, or restore a part by hand.",
     );
   }
-  if (points.length === 1) return best;
-  if (best !== points[0]) info(dim(`The newest restore point isn't a complete backup, so ${when(best)} is suggested.`));
+  if (points.length === 1 && !always) return best;
+  if (best !== points[0] && !current) info(dim(`The newest restore point isn't a complete backup, so ${when(best)} is suggested.`));
   return ask.select({
     message: "Which restore point?",
     pageSize: 12,
-    default: best,
+    default: points.find((pt) => pt.id === current?.id) ?? best,
     choices: points.map((pt) => ({
       value: pt,
       name: pointLabel(pt, pt === best),

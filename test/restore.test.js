@@ -15,6 +15,7 @@ import { paths } from "../src/paths.js";
 import { restoreFlow } from "../src/flows/restore.js";
 import { app } from "../src/app.js";
 import { findPhp } from "../src/laravel.js";
+import { describeFound } from "../src/flows/adopt.js";
 import { dumpFilter } from "../src/dump.js";
 import { applyRetention } from "../src/retention.js";
 import { copyDatabaseName, discoverApps, listPoints, restoreApp, restoreFilesByPath } from "../src/restore.js";
@@ -441,6 +442,34 @@ test("single files with awkward names: not valid UTF-8 (Latin-1), and pattern ch
   assert.deepEqual(spawnSync("bash", ["-c", `printf %s ${shellQuote(restored)}`]).stdout, restored);
 });
 
+test("new server: a wrong suggestion can be corrected at the summary, before anything is restored", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const old = await setup();
+  const { root, p } = await newServer(old);
+  const wrong = join(root, "srv/old-path");
+  const right = join(root, "srv/shop");
+  for (const d of [wrong, right]) {
+    await mkdir(d, { recursive: true });
+    await writeFile(join(d, "artisan"), "");
+  }
+  const ask = scripted([
+    ["input", /Where should shop go/, (o) => (assert.equal(o.default, old.dir), wrong)], // Enter on a wrong answer
+    ["input", /Database name/, (o) => (assert.equal(o.default, "shop_prod"), "shop_prod")],
+    ["select", /Go ahead/, "dir"],
+    ["input", /Where should shop go/, (o) => (assert.equal(o.default, wrong, "starts from the answer given"), right)],
+    ["select", /Go ahead/, "db"],
+    ["input", /Database name/, (o) => (assert.equal(o.default, "shop_prod"), "shop_new")],
+    ["select", /Go ahead/, "go"],
+    ["confirm", /Keep backing up shop/, false],
+  ]);
+  const out = await captured(() => restoreFlow(ask, { p }));
+  assert.deepEqual(ask.remaining, []);
+  assert.match(out, /restored into shop_new/);
+  assert.equal((await readFile(join(right, "storage/app/private/invoices/88.pdf"))).length, 500, "into the corrected folder");
+  assert.equal(existsSync(join(wrong, "storage/app/private")), false, "nothing in the first answer's folder");
+  assert.equal(existsSync(join(dbDir, "shop_prod")), true, "the old name's database (there already) untouched");
+});
+
 // A second server using the same repository: nothing set up yet.
 async function newServer(from) {
   const root = await mkdtemp(join(tmpdir(), "agouti-newserver-"));
@@ -490,7 +519,7 @@ test("new server: the app is restored into empty places and set up to be backed 
   const ask = scripted([
     ["input", /Where should shop go/, (o) => (assert.equal(o.default, old.dir), dir)],
     ["input", /Database name/, "shop_new"],
-    ["confirm", /Go ahead/, true],
+    ["select", /Go ahead/, (o) => (assert.equal(o.default, "go"), "go")],
     ["confirm", /Keep backing up shop/, true],
     ["confirm", /daily automatic backups/, false],
   ]);
@@ -610,12 +639,14 @@ test("new server: suggests the newest complete backup, and can't pick an incompl
     ],
     ["input", /Where should shop go/, dir],
     ["input", /Database name/, "shop_new"],
-    ["confirm", /Go ahead/, true],
+    ["select", /Go ahead/, (o) => (assert.equal(o.default, "go"), "go")],
     ["confirm", /Keep backing up shop/, false],
   ]);
   const out = await captured(() => restoreFlow(ask, { p }));
   assert.deepEqual(ask.remaining, []);
   assert.match(out, /The newest restore point isn't a complete backup/);
+  const [found] = await discoverApps({ bin: restic, env: await resticEnv(old.config, p) });
+  assert.match(describeFound(found), /last complete backup .* \(a newer one is incomplete\)/, "an incomplete backup isn't called the last one");
   assert.match(out, new RegExp(`restore shop as it was on`));
   assert.match(out, /✓ database  restored into shop_new/);
   assert.equal((await readFile(join(dir, "storage/app/private/invoices/88.pdf"))).length, 500);
@@ -638,7 +669,7 @@ test("agouti connect lists the apps found in the backups", async (t) => {
   const env = { ...process.env, AGOUTI_CONFIG_DIR: join(root, "etc"), AGOUTI_DATA_DIR: join(root, "var"), NO_COLOR: "1" };
   const r = spawnSync(process.execPath, [BIN, "connect", old.config.repository, "--recovery-key", "agouti-rk-TEST"], { env, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /Found 1 app in the backups:\n  shop .* database shop_prod · last backup just now/);
+  assert.match(r.stdout, /Found 1 app in the backups:\n  shop .* database shop_prod · last complete backup just now/);
   // "sudo agouti", or the full command where sudo can't find agouti (#11), as here and in CI.
   assert.match(r.stdout, /sudo (agouti|\S+ \S+\/bin\/agouti\.js) → Restore/);
 });

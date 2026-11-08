@@ -78,7 +78,23 @@ export async function discoverApps({ bin, env }) {
     }
     // Backups made before descriptions existed: work it out from the snapshots.
     description ??= guessDescription(app);
-    found.push({ name: app.name, host: app.host, at: app.at, points: app.points.size, description });
+    // The newest point that could actually be restored: a database, and the files if
+    // the app has any. A newer, incomplete one shouldn't be called the last backup.
+    const needFiles = (description.files ?? []).length > 0;
+    const byPoint = new Map();
+    for (const snap of app.snapshots) {
+      const tag = (name) => snap.tags?.find((t) => t.startsWith(`${name}=`))?.slice(name.length + 1);
+      const pt = byPoint.get(tag("point")) ?? { at: snap.time, parts: new Set() };
+      pt.parts.add(tag("part"));
+      if (snap.time > pt.at) pt.at = snap.time;
+      byPoint.set(tag("point"), pt);
+    }
+    const completeAt = [...byPoint.values()]
+      .filter((pt) => pt.parts.has("database") && (!needFiles || pt.parts.has("files")))
+      .map((pt) => pt.at)
+      .sort()
+      .at(-1);
+    found.push({ name: app.name, host: app.host, at: app.at, completeAt, points: app.points.size, description });
   }
   return found.sort((a, b) => b.at.localeCompare(a.at));
 }
