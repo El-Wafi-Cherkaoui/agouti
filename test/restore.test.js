@@ -14,6 +14,7 @@ import { loadConfig, saveConfig, saveRecoveryKey } from "../src/config.js";
 import { paths } from "../src/paths.js";
 import { restoreFlow } from "../src/flows/restore.js";
 import { app } from "../src/app.js";
+import { findPhp } from "../src/laravel.js";
 import { dumpFilter } from "../src/dump.js";
 import { applyRetention } from "../src/retention.js";
 import { copyDatabaseName, discoverApps, listPoints, restoreApp, restoreFilesByPath } from "../src/restore.js";
@@ -156,6 +157,7 @@ test("an unfinished replace is remembered: the home screen warns, backups are fl
     ["select", /What do you want to do/, (o) => (assert.equal(o.choices[0].value, "unfinished", "first in the menu"), "unfinished")],
     ["select", /shop: A replace .* didn't finish.*What now/, (o) => (assert.ok(o.choices.find((c) => c.value === "again")), "back")],
     ["confirm", /Replace shop's live database with the state from before/, true],
+    ["confirm", /Clear the app's Laravel cache now/, false], // a repair is a replace too (#14)
     ["select", /What do you want to do/, (o) => (assert.equal(o.choices.find((c) => c.value === "unfinished"), undefined, "repaired: gone"), "quit")],
   ]);
   const out = await captured(() => app({ ask, p }));
@@ -366,6 +368,55 @@ test("interactive: a copy by default; replacing needs the app's name typed", asy
   assert.match(out2, /Files added since are deleted/);
   assert.match(out2, /Nothing was changed/);
   assert.ok(existsSync(join(dir, "storage/app/public/stray.txt")));
+});
+
+test("after a replace, a Laravel app's cache is cleared on request, as the app's owner; skipping says what it means", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { root, p, dir } = await setup();
+  // A stand-in php: records how artisan was called, or fails when told to.
+  const php = join(root, "php");
+  const log = join(root, "php.log");
+  await writeFile(php, `#!/bin/sh\nif [ -n "$PHP_FAIL" ]; then echo "  In Connection.php: SQLSTATE[HY000] [2002] Connection refused"; exit 1; fi\necho "$PWD $*" >> ${log}\necho "   INFO  Application cache cleared successfully."\n`);
+  await chmod(php, 0o755);
+  process.env.AGOUTI_PHP = php;
+  const replace = (answer) =>
+    scripted([
+      ["select", /Which restore point/, (o) => o.choices[0].value],
+      ["select", /What do you want to restore/, "database"],
+      ["select", /How\?/, "replace"],
+      ["input", /Type .*shop.* to confirm/, "shop"],
+      ["confirm", /Clear the app's Laravel cache now/, (o) => (assert.equal(o.default, true), answer)],
+    ]);
+  try {
+    let ask = replace(true);
+    let out = await captured(() => restoreFlow(ask, { p }));
+    assert.deepEqual(ask.remaining, []);
+    assert.match(out, /✓ Laravel's cache cleared \(as /);
+    assert.equal((await readFile(log, "utf8")).trim(), `${dir} artisan cache:clear --no-interaction`, "in the app's folder");
+    assert.doesNotMatch(out, /Clear the app's caches if it has any/, "no leftover hint");
+
+    ask = replace(false);
+    out = await captured(() => restoreFlow(ask, { p }));
+    assert.match(out, /may show data from before the restore/);
+
+    process.env.PHP_FAIL = "1";
+    ask = replace(true);
+    out = await captured(() => restoreFlow(ask, { p }));
+    assert.match(out, /Couldn't clear the cache: In Connection\.php: SQLSTATE\[HY000\] \[2002\] Connection refused\. Until it's cleared/);
+  } finally {
+    delete process.env.AGOUTI_PHP;
+    delete process.env.PHP_FAIL;
+  }
+});
+
+test("php is found where sudo's PATH doesn't look: in the app owner's home (Laravel Herd)", async () => {
+  const home = await mkdtemp(join(tmpdir(), "agouti-home-"));
+  const sudoPath = "/nonexistent/sbin:/nonexistent/bin";
+  assert.equal(await findPhp(home, { path: sudoPath }).then((x) => (x?.startsWith(home) ? x : null)), null, "nothing in that home yet");
+  await mkdir(join(home, ".config/herd-lite/bin"), { recursive: true });
+  await writeFile(join(home, ".config/herd-lite/bin/php"), "#!/bin/sh\n");
+  await chmod(join(home, ".config/herd-lite/bin/php"), 0o755);
+  assert.equal(await findPhp(home, { path: sudoPath }), join(home, ".config/herd-lite/bin/php"));
 });
 
 // A second server using the same repository: nothing set up yet.

@@ -9,7 +9,7 @@ import { offerBringBack } from "./flows/adopt.js";
 import { alertsFlow } from "./flows/alerts.js";
 import { protectFlow, protectionLabel } from "./flows/protect.js";
 import { protectionKind } from "./protection.js";
-import { restoreFlow, runRestore } from "./flows/restore.js";
+import { afterReplace, restoreFlow, runRestore } from "./flows/restore.js";
 import { replaceText } from "./backup.js";
 import { verifyFlow, verifyLabel } from "./flows/verify.js";
 import { printStatus, scheduleFlow } from "./flows/schedule.js";
@@ -227,7 +227,8 @@ async function unfinishedFlow(ask, unfinished, p) {
   }
   const point = choice === "back" ? u.safety : u.point;
   if (!(await ask.confirm({ message: `Replace ${u.app}'s live ${what} with ${choice === "back" ? "the state from before" : "that backup"}?`, default: true }))) return;
-  await runRestore({ app: u.app, point, parts: u.parts, mode: "replace" }, { p });
+  const result = await runRestore({ app: u.app, point, parts: u.parts, mode: "replace" }, { p });
+  await afterReplace(ask, (await loadConfig(p))?.projects?.[u.app], result);
 }
 
 async function acceptFlow(ask, flagged, p) {

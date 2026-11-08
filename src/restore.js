@@ -245,7 +245,7 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
       }
     }
 
-    const result = { app, point: point.id, at: point.at, mode, ok: true };
+    const result = { app, point: point.id, at: point.at, mode, ok: true, framework: project.framework };
     // Replacing drops the live database, so first prove this backup loads. Once it's
     // dropped, a damaged backup would leave nothing, and undo may share the same damage.
     if (mode === "replace" && parts.includes("database")) {

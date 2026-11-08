@@ -8,6 +8,7 @@ import { formatBytes } from "../detect.js";
 import { paths } from "../paths.js";
 import { adminConnection, copyDatabaseName, discoverApps, findFiles, listPoints, newestBackup, restoreApp, restoreFilesByPath } from "../restore.js";
 import { bringBack, describeFound } from "./adopt.js";
+import { clearLaravelCache } from "../laravel.js";
 import { ensureRestic, resticEnv } from "../restic.js";
 import { UserError, bold, dim, green, info, red, warn, yellow } from "../ui.js";
 
@@ -78,7 +79,21 @@ export async function restoreFlow(ask, { p = paths(), app } = {}) {
   if (mode === "replace" && !(await confirmReplace(ask, app, project, parts, point))) return info("Nothing was changed.");
   const admin = parts.includes("database") ? await askAdmin(ask, project, p) : undefined;
   info("");
-  await runRestore({ app, point: point.id, parts, mode, admin }, { p });
+  const result = await runRestore({ app, point: point.id, parts, mode, admin }, { p });
+  await afterReplace(ask, project, result);
+}
+
+// After the live database was replaced: a Laravel app may still serve cached data
+// from before. Offer to clear the cache now, and say plainly what skipping means.
+export async function afterReplace(ask, project, result) {
+  if (result?.mode !== "replace" || !result.database?.ok || project?.framework !== "laravel") return;
+  const stale = "Until it's cleared, the app may show data from before the restore (Laravel keeps cached results outside the database).";
+  if (!(await ask.confirm({ message: "Clear the app's Laravel cache now? (php artisan cache:clear)", default: true }))) {
+    return warn(`${stale} Clear it yourself: cd ${project.path} && php artisan cache:clear, as the app's user.`);
+  }
+  const r = await clearLaravelCache(project.path);
+  if (r.ok) return info(`${green("✓")} Laravel's cache cleared (as ${r.owner})`);
+  warn(`Couldn't clear the cache: ${r.error}. ${stale} Run it yourself, as ${r.owner}: cd ${project.path} && php artisan cache:clear`);
 }
 
 export function pointLabel(pt, latest = false) {
@@ -258,7 +273,8 @@ function nextSteps(r) {
     if (r.files?.ok) lines.push(`Copy back what you need from ${r.files.path} (cp -a keeps owners), then delete it.`);
   } else if (r.mode === "replace") {
     if (r.safety?.ok) lines.push(`To undo: sudo agouti restore ${r.app} --point ${r.safety.point} --replace`);
-    if (r.ok) lines.push("Clear the app's caches if it has any (Laravel: php artisan cache:clear), then bring it back up.");
+    if (r.ok && r.framework !== "laravel") lines.push("Clear the app's caches if it has any, then bring it back up.");
+    if (r.ok && r.framework === "laravel") lines.push("Bring the app back up (php artisan up) once you've checked it.");
   }
   if (lines.length) info(dim(`\n${lines.join("\n")}`));
 }
