@@ -141,6 +141,12 @@ export async function verifyApps(names = [], { p = paths(), onEvent = () => {}, 
 // file comes before it.
 function checkError(text) {
   const lines = text.trim().split("\n").filter(Boolean);
+  // "pack 0103...f566 contains 6 errors: [...]": say it plainly, name the file.
+  const packs = [...text.matchAll(/pack ([0-9a-f]{64}) contains (\d+) errors?/g)];
+  if (packs.length) {
+    const files = packs.map(([, id, n]) => `data/${id.slice(0, 2)}/${id.slice(0, 8)}… (${n} damaged ${n === "1" ? "piece" : "pieces"})`);
+    return `${packs.length === 1 ? "a data file on the storage is damaged" : `${packs.length} data files on the storage are damaged`}: ${files.join(", ")}`;
+  }
   const specific = lines.find((l) => /pack [0-9a-f]{8}|ciphertext verification failed|not referenced|error for tree|is damaged/i.test(l));
   const last = lines.at(-1)?.replace(/^Fatal:\s*/, "") ?? "";
   return specific && specific !== lines.at(-1) ? `${last} (${specific.trim().slice(0, 200)})` : last;

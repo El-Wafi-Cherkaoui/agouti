@@ -103,3 +103,19 @@ test("suggested commands work under sudo: the full command when sudo can't find 
     setAgoutiCommand(script, { node: process.execPath, dirs: [join(root, "bin")] }); // short form: leaves other tests' text alone
   }
 });
+
+test("times in UTC get the server's local time next to them, from the system's rules, unless the server is on UTC", async () => {
+  const { localNote } = await import("../src/ui.js");
+  const saved = process.env.TZ;
+  try {
+    process.env.TZ = "Asia/Tokyo"; // read by `date`, the system's rules
+    assert.equal(localNote("2026-11-08T23:30:00Z"), " (2026-11-09 08:30 local)", "the date when it's another day");
+    assert.equal(localNote("2026-11-08T05:00:00Z"), " (14:00 local)");
+    process.env.TZ = "UTC";
+    assert.equal(localNote("2026-11-08T13:01:04Z"), "", "nothing to add on a UTC server");
+  } finally {
+    if (saved === undefined) delete process.env.TZ;
+    else process.env.TZ = saved;
+  }
+  assert.equal(localNote("2026-11-08T23:30:00Z", { timeZone: "Asia/Tokyo" }), " (2026-11-09 08:30 local)", "the fallback without `date`");
+});

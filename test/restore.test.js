@@ -393,6 +393,7 @@ test("after a replace, a Laravel app's cache is cleared on request, as the app's
     let out = await captured(() => restoreFlow(ask, { p }));
     assert.deepEqual(ask.remaining, []);
     assert.match(out, /✓ Laravel's cache cleared \(as /);
+    assert.match(out, /✓ Current state saved[^\n]*\nReplacing the live database\.\.\./, "live data starts changing here, and says so (#44)");
     assert.equal((await readFile(log, "utf8")).trim(), `${dir} artisan cache:clear --no-interaction`, "in the app's folder");
     assert.doesNotMatch(out, /Clear the app's caches if it has any/, "no leftover hint");
 
@@ -468,6 +469,36 @@ test("new server: a wrong suggestion can be corrected at the summary, before any
   assert.equal((await readFile(join(right, "storage/app/private/invoices/88.pdf"))).length, 500, "into the corrected folder");
   assert.equal(existsSync(join(wrong, "storage/app/private")), false, "nothing in the first answer's folder");
   assert.equal(existsSync(join(dbDir, "shop_prod")), true, "the old name's database (there already) untouched");
+});
+
+test("backup counts after a replace and after deletions say what really happened", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { p, dir } = await setup();
+  await restoreApp({ app: "shop", parts: ["files"], mode: "replace" }, { p });
+  const { runBackup } = await import("../src/flows/backup.js");
+  let out = await captured(() => runBackup([], { p, live: false }));
+  assert.match(out, /"Changed" includes every file the last replace rewrote/, "explained once, after the replace (#13)");
+  out = await captured(() => runBackup([], { p, live: false }));
+  assert.doesNotMatch(out, /last replace rewrote/, "not on later backups");
+
+  await rm(join(dir, "storage/app/private/invoices/88.pdf"));
+  out = await captured(() => runBackup([], { p, live: false }));
+  assert.match(out, /✓ files +1 file · .* · 1 removed ·/, "a deletion isn't \"no changes\" (#30)");
+
+});
+
+test("a replace that brings back a file deleted since the last backup: 1 new, nothing removed", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  // As on 2026-11-08: backup (2 files), a file deleted with no backup after it, then a
+  // replace from that backup, then a backup. The safety point (1 file) is restic's
+  // parent; counting "removed" against the older backup (2 files) invented one.
+  const { p, dir, point } = await setup();
+  await rm(join(dir, "storage/app/private/invoices/88.pdf"));
+  await restoreApp({ app: "shop", point, parts: ["files"], mode: "replace" }, { p });
+  const { runBackup } = await import("../src/flows/backup.js");
+  const out = await captured(() => runBackup([], { p, live: false }));
+  assert.match(out, /✓ files +2 files · .* · 1 new(, \d+ changed)? · /);
+  assert.doesNotMatch(out, /removed/);
 });
 
 // A second server using the same repository: nothing set up yet.

@@ -63,7 +63,7 @@ export async function runVerify(names = [], { p = paths(), live = process.stdout
         const read = e.result.dataParts ? ` · read part ${e.result.dataPart} of ${e.result.dataParts} of the backup data (all of it every ${e.result.dataParts} tests)` : "";
         if (e.result.ok) info(`${green("✓")} Repository: no errors${dim(read)}`);
         else if (e.result.locked) info(`${yellow("⚠")} ${e.result.error}`);
-        else info(`${red("✕")} Repository: ${e.result.error}. The storage may be damaged: check the drive or storage, and don't delete anything there.`);
+        else info(`${red("✕")} Repository: ${e.result.error}. ${/damaged/.test(e.result.error) ? "" : "The storage may be damaged: "}Check the drive or storage, and don't delete anything there.`);
       }
       if (e.type === "app-start") info(`\nTesting ${bold(e.app)}: restore point ${e.pointAt.replace("T", " ").slice(0, 16)} ${dim("(UTC)")} ...`);
       if (e.type === "progress" && live) {

@@ -313,7 +313,7 @@ test("alerts: a message saying what failed and what to do, then one when it work
   }
   let [failure] = sent();
   assert.equal(failure.event, "failure");
-  assert.match(failure.title, /^✕ Agouti on .+: a problem with tonight's backup$/);
+  assert.match(failure.title, /^✕ Agouti on .+: a problem with the last backup$/);
   assert.deepEqual(failure.lines, [
     "shop: the database wasn't backed up: Got error: 1045: Access denied for user 'shop'@'localhost'",
     `  Has the password of shop changed? Credentials are in ${join(p.configDir, "..", "shop.cnf")}.`,

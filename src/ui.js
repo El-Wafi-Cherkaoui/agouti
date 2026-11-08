@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 
@@ -59,4 +60,37 @@ export function shellQuote(s) {
     return `$'${esc}'`;
   }
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+// " (14:01 local)" for a UTC time, when this server's clock isn't on UTC: restore
+// points are named in UTC, but people think in their own time. "" on a UTC server.
+// The system's own time zone rules decide (`date`), not Node's: Node carries a
+// built-in copy that can be older than the system's (it still had Morocco on UTC+1
+// after Morocco moved to UTC+0 in September 2026). timeZone: tests only.
+export function localNote(iso, { timeZone } = {}) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const utc = d.toISOString().slice(0, 16).replace("T", " ");
+  const local = timeZone ? intlLocal(d, timeZone) : systemLocal(d);
+  if (!local || local === utc) return "";
+  return ` (${local.slice(0, 10) === utc.slice(0, 10) ? local.slice(11) : local} local)`;
+}
+
+const localCache = new Map();
+function systemLocal(d) {
+  const key = `${process.env.TZ ?? ""}@${Math.floor(d.getTime() / 60000)}`;
+  if (!localCache.has(key)) {
+    const r = spawnSync("date", ["-d", `@${Math.floor(d.getTime() / 1000)}`, "+%Y-%m-%d %H:%M"], { encoding: "utf8", timeout: 2000 });
+    localCache.set(key, r.status === 0 ? r.stdout.trim() : intlLocal(d)); // no `date` (or not GNU): Node's rules
+  }
+  return localCache.get(key);
+}
+
+function intlLocal(d, timeZone) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-GB", { timeZone, hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+      .formatToParts(d)
+      .map((x) => [x.type, x.value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
 }

@@ -101,10 +101,13 @@ async function home(config, ask, p) {
     `\n${bold("agouti")} · ${apps.length} ${apps.length === 1 ? "app" : "apps"} · repo: ${describeRepository(config.repository)}${protectionLabel(config) ? ` · ${protectionLabel(config)}` : ""}`,
   );
   if (apps.length === 0) info(dim("No apps yet. Add your first one to start backing up."));
-  else info(dim(`  ${"APP".padEnd(14)}${"LAST BACKUP".padEnd(LABEL)}RESTORE TEST`));
+  const nameWidth = Math.max(14, ...apps.map(([name]) => name.length + 2));
+  const visible = (t) => t.replace(/\x1b\[[0-9;]*m/g, "").length;
+  const labelWidth = Math.max(LABEL, ...apps.map(([name]) => visible(lastBackupLabel(state.projects[name])) + 2));
+  if (apps.length) info(dim(`  ${"APP".padEnd(nameWidth)}${"LAST BACKUP".padEnd(labelWidth)}RESTORE TEST`));
   for (const [name] of apps) {
     const s = state.projects[name];
-    info(`  ${bold(name.padEnd(14))}${padVisible(lastBackupLabel(s), LABEL)}${verifyLabel(s?.lastVerify, Boolean(config.verify))}`);
+    info(`  ${bold(name.padEnd(nameWidth))}${padVisible(lastBackupLabel(s), labelWidth)}${verifyLabel(s?.lastVerify, Boolean(config.verify))}`);
   }
   // First: an unfinished replace means live data may be half there.
   const unfinished = apps.filter(([name]) => state.projects[name]?.replacing).map(([name]) => ({ app: name, ...state.projects[name].replacing }));

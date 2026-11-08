@@ -50,7 +50,10 @@ export async function backupApps(names = [], { p = paths(), onEvent = () => {}, 
       const s = state.projects[name];
       const baseline = safety ? undefined : (s?.baseline ?? baselineOf(s?.lastSuccess));
       const replacing = safety ? undefined : s?.replacing;
-      const result = await backupApp(name, config.projects[name], { bin, env, onEvent, extraTags: tags, baseline, replacing, isStopped: () => stopped });
+      // A replace rewrites every restored file's metadata, so restic re-reads them all
+      // and calls them changed, though their contents (and the upload) are the same.
+      const afterReplace = !safety && s?.lastReplace && (!s.lastBackup || s.lastReplace > s.lastBackup.at);
+      const result = await backupApp(name, config.projects[name], { bin, env, onEvent, extraTags: tags, baseline, replacing, afterReplace, isStopped: () => stopped });
       // A point saved before a restore isn't a backup: counted as one, the status would
       // say "backed up 5 min ago" while real backups had stopped days ago.
       if (!safety) await recordBackup(name, result, p);
@@ -85,7 +88,7 @@ export function pointId(date = new Date()) {
     .replace(/\.\d+Z$/, "Z");
 }
 
-async function backupApp(name, project, { bin, env, onEvent, extraTags = [], baseline, replacing, isStopped = () => false }) {
+async function backupApp(name, project, { bin, env, onEvent, extraTags = [], baseline, replacing, afterReplace = false, isStopped = () => false }) {
   const started = new Date();
   const point = pointId(started);
   const tags = ["agouti", `app=${name}`, `point=${point}`, ...extraTags];
@@ -121,7 +124,11 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [], bas
     if (missing.length) return { ok: false, error: `Folder missing: ${missing.join(", ")}. Was it moved or deleted?` };
 
     const { patterns, ignored } = excludePatterns(project);
-    const r = await runJson(bin, [...common, "--tag", [...tags, "part=files"].join(","), ...patterns.flatMap((x) => ["--exclude", x]), ...dirs], {
+    // Compare with this app's newest files backup of any kind (a safety point
+    // included), and tell restic so: its new/changed counts and our removed count
+    // then refer to the same backup.
+    const parent = await latestFiles(bin, env, name);
+    const r = await runJson(bin, [...common, "--tag", [...tags, "part=files"].join(","), ...(parent ? ["--parent", parent.id] : []), ...patterns.flatMap((x) => ["--exclude", x]), ...dirs], {
       env,
       onMessage: progress,
     });
@@ -134,7 +141,7 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [], bas
     const unreadable = r.errors.filter((m) => !/no such file or directory/i.test(m.error?.message ?? ""));
     const warnings = [
       ...(unreadable.length ? [unreadableText(unreadable)] : []),
-      ...ignored.map((x) => `Exclude rule ignored, so these files were backed up: ${x}.`),
+      ...ignored.map((x) => `An exclude rule was ignored, so it left nothing out: ${x}.`),
     ];
     return {
       ok: true,
@@ -144,6 +151,9 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [], bas
       added: r.summary.data_added,
       newFiles: r.summary.files_new,
       changed: r.summary.files_changed,
+      // restic counts new and changed files, not removed ones: work it out from the parent.
+      removed: parent?.files != null ? Math.max(0, parent.files - (r.summary.total_files_processed - r.summary.files_new)) : 0,
+      ...(afterReplace && r.summary.files_changed > 0 ? { afterReplace: true } : {}),
       ...(unreadable.length ? { unreadable: unreadableText(unreadable) } : {}),
       ...(warnings.length ? { warning: warnings.join(" ") } : {}),
     };
@@ -201,6 +211,15 @@ export function shrinkage(baseline, result) {
   }
   if (!drops.length) return null;
   return `The data shrank sharply: ${drops.join("; ")}${when}. If that wasn't deleted on purpose, check the app now: this backup may hold damaged data, and older restore points are kept until this is resolved.`;
+}
+
+// { id, files } of the app's newest files snapshot, or null.
+async function latestFiles(bin, env, app) {
+  const r = await run(bin, ["snapshots", "--json", "--tag", `agouti,app=${app},part=files`], { env });
+  if (r.code !== 0) return null;
+  const snaps = JSON.parse(r.stdout || "[]") ?? [];
+  const last = snaps.sort((a, b) => a.time.localeCompare(b.time)).at(-1);
+  return last ? { id: last.id, files: last.summary?.total_files_processed ?? null } : null;
 }
 
 function unreadableText(errors) {

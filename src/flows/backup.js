@@ -13,7 +13,7 @@ import { CHANNELS, loadAlerts, sendAlert } from "../alerts.js";
 import { hostname } from "node:os";
 import { verifyDue } from "../verify.js";
 import { runVerify, verifySummary } from "./verify.js";
-import { bold, dim, green, info, red, warn, withCommand, yellow } from "../ui.js";
+import { bold, dim, green, info, localNote, red, warn, withCommand, yellow } from "../ui.js";
 
 export async function runBackup(names = [], { p = paths(), live = process.stdout.isTTY } = {}) {
   const results = await backupApps(names, { p, log: info, onEvent: reporter(live) });
@@ -161,11 +161,11 @@ async function alert(ok, problems, p) {
     const n = problems.filter((l) => !l.startsWith("  ")).length || 1;
     message = {
       event: "failure",
-      title: `✕ Agouti on ${hostname()}: ${n === 1 ? "a problem" : `${n} problems`} with tonight's backup`,
+      title: `✕ Agouti on ${hostname()}: ${n === 1 ? "a problem" : `${n} problems`} with the last backup`,
       lines: [...(problems.length ? problems : ["Something failed: see journalctl -u agouti-backup"]), "  Details: journalctl -u agouti-backup"],
     };
   } else if (previous && !previous.ok) {
-    message = { event: "recovered", title: `✓ Agouti on ${hostname()}: backups are working again`, lines: ["Tonight's backup went fine."] };
+    message = { event: "recovered", title: `✓ Agouti on ${hostname()}: backups are working again`, lines: ["The last backup went fine."] };
   } else return;
   for (const r of await sendAlert(channels, message)) {
     if (r.ok) info(dim(`Alert sent: ${CHANNELS[r.kind].name}`));
@@ -200,11 +200,12 @@ function reporter(live) {
       info(`  ${partLine(e.part, e.result)}`);
       if (e.result.hint) info(`    ${dim(e.result.hint)}`);
       if (e.result.warning) info(`    ${yellow("⚠")} ${e.result.warning}`);
+      if (e.result.afterReplace) info(dim(`    "Changed" includes every file the last replace rewrote: their contents are the same, and only real changes were uploaded.`));
     }
     if (e.type === "app-done") {
       const r = e.result;
       const when = r.at.replace("T", " ").slice(0, 16);
-      if (r.ok) info(`${green("✓")} Restore point ${bold(`${r.app} @ ${when}`)} ${dim("(UTC)")}`);
+      if (r.ok) info(`${green("✓")} Restore point ${bold(`${r.app} @ ${when}`)} ${dim(`(UTC)${localNote(r.at)}`)}`);
       else info(`${red("✕")} ${bold(r.app)}: ${r.stopped ? "backup stopped with Ctrl-C" : "backup incomplete"}. ${savedParts(r)}`);
       if (r.warning) info(`  ${yellow("⚠")} ${r.warning}`);
       if (r.shrunk) info(`${yellow("⚠")} ${bold(r.app)}: ${r.shrunk}`);
@@ -219,7 +220,8 @@ function partLine(part, r) {
   if (!r.ok) return `${red("✕")} ${label} ${r.error}`;
   if (r.skipped) return `${dim("-")} ${label} ${dim("no folders selected")}`;
   if (part === "database") return `${green("✓")} ${label} ${formatBytes(r.bytes)} dumped · ${formatBytes(r.added)} new · ${secs}`;
-  const changes = r.newFiles || r.changed ? `${r.newFiles} new, ${r.changed} changed` : "no changes";
+  const counts = [r.newFiles && `${r.newFiles} new`, r.changed && `${r.changed} changed`, r.removed && `${r.removed} removed`].filter(Boolean);
+  const changes = counts.length ? counts.join(", ") : "no changes";
   return `${green("✓")} ${label} ${r.files.toLocaleString("en-US")} ${r.files === 1 ? "file" : "files"} · ${formatBytes(r.bytes)} · ${changes} · ${formatBytes(r.added)} uploaded · ${secs}`;
 }
 

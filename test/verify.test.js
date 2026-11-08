@@ -343,7 +343,7 @@ test("damaged backup data that a plain check misses is found: each test reads a 
   assert.equal(r.ok, false);
   assert.equal(r.apps[0].status, "failed");
   assert.doesNotMatch(out, /backup verified/);
-  assert.match(out, /✕ Repository: .*The storage may be damaged/);
+  assert.match(out, /✕ Repository: a data file on the storage is damaged: data\/[0-9a-f]{2}\/[0-9a-f]{8}… \(\d+ damaged pieces?\)\. Check the drive or storage/);
   assert.deepEqual(results.map(({ r }) => r.repository.dataPart), [2, 3, 4, 1]);
 });
 

@@ -12,7 +12,7 @@ import { clearLaravelCache } from "../laravel.js";
 import { flaggedPoints } from "../state.js";
 import { onDisk } from "../names.js";
 import { ensureRestic, resticEnv } from "../restic.js";
-import { UserError, bold, dim, green, info, red, shellQuote, warn, yellow } from "../ui.js";
+import { UserError, bold, dim, green, info, localNote, red, shellQuote, warn, yellow } from "../ui.js";
 
 export async function restoreFlow(ask, { p = paths(), app } = {}) {
   const config = await requireConfig(p);
@@ -99,7 +99,7 @@ export async function afterReplace(ask, project, result) {
 }
 
 export function pointLabel(pt, latest = false) {
-  const when = `${pt.at.replace("T", " ").slice(0, 16)} UTC`;
+  const when = `${pt.at.replace("T", " ").slice(0, 16)} UTC${dim(localNote(pt.at))}`;
   const parts = pt.database && pt.files ? "database + files" : pt.database ? yellow("database only") : yellow("files only");
   const notes = [latest && "latest", pt.safety && "saved before a restore"].filter(Boolean);
   return `${when}  ${dim(ago(pt.at).padEnd(11))} ${parts}${notes.length ? dim(`  (${notes.join(", ")})`) : ""}${flagNote(pt)}`;
@@ -120,9 +120,9 @@ export function pointDetails(pt) {
 
 async function confirmReplace(ask, app, project, parts, point) {
   info(`
-${yellow("⚠")} ${bold("This replaces live data")} with the state of ${point.at.replace("T", " ").slice(0, 16)} UTC:
+${yellow("⚠")} ${bold("This replaces live data")} with the state of ${point.at.replace("T", " ").slice(0, 16)} UTC${localNote(point.at)}:
 ${parts.includes("database") ? `  · database ${bold(project.database.name)}: dropped and recreated from the backup. Changes made since are lost.\n` : ""}${
-    parts.includes("files") ? `  · ${project.files.map((f) => bold(f)).join(", ")}: made identical to the backup. Files added since are deleted.\n` : ""
+    parts.includes("files") ? `  · ${project.files.map((f) => bold(f)).join(", ")}: made identical to the backup. Files added since are deleted${project.exclude?.length ? ", except those left out by exclude rules, which stay as they are" : ""}.\n` : ""
   }
 ${parts.includes("database") ? "Agouti first tries this backup in a throwaway database, and stops if it doesn't load.\n" : ""}Before replacing, it makes a restore point of the current state, so this can be undone.
 Put the app in maintenance mode first if it's live (Laravel: php artisan down).
@@ -215,6 +215,7 @@ export async function runRestore(opts, { p = paths(), live = process.stdout.isTT
         info(`${green("✓")} The backup loads correctly`);
       }
       if (e.type === "safety-start") info(dim("Saving the current state first, so this can be undone..."));
+      if (e.type === "part-start" && opts.mode === "replace") info(`Replacing the live ${e.part}${e.part === "database" ? "" : " (the backed-up folders)"}... ${dim("(from here, Ctrl-C asks before stopping)")}`);
       if (e.type === "safety-done") {
         const r = e.result;
         if (r.ok) info(`${green("✓")} Current state saved: restore point ${bold(r.point)}`);
@@ -300,6 +301,6 @@ export function printPoints(app, points) {
   info(dim(`  ${"POINT".padEnd(18)}${"WHEN (UTC)".padEnd(18)}CONTENTS`));
   for (const pt of points) {
     const parts = pt.database && pt.files ? "database + files" : pt.database ? "database only" : "files only";
-    info(`  ${pt.id.padEnd(18)}${pt.at.replace("T", " ").slice(0, 16).padEnd(18)}${parts}${pt.safety ? "  (saved before a restore)" : ""}${flagNote(pt)}`);
+    info(`  ${pt.id.padEnd(18)}${pt.at.replace("T", " ").slice(0, 16).padEnd(18)}${parts}${localNote(pt.at)}${pt.safety ? "  (saved before a restore)" : ""}${flagNote(pt)}`);
   }
 }

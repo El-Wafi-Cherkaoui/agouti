@@ -85,7 +85,10 @@ export async function recordReplace(name, replacing, p = paths()) {
   const state = await loadState(p);
   const next = { ...(state.projects[name] ?? {}) };
   if (replacing) next.replacing = replacing;
-  else delete next.replacing;
+  else {
+    delete next.replacing;
+    next.lastReplace = new Date().toISOString(); // the next backup explains its "changed" count
+  }
   state.projects[name] = next;
   await writeAtomic(stateFile(p), JSON.stringify(state, null, 2) + "\n", 0o644);
 }
