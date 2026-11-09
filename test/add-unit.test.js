@@ -130,3 +130,21 @@ test("dirStats counts files whose names aren't valid UTF-8", async () => {
   await writeFile(join(sub, "normal.txt"), "123");
   assert.deepEqual(await dirStats(dir), { bytes: 8, files: 2 });
 });
+
+test("storage/app as a whole: chosen only when it has no disk folders, and never together with them", async () => {
+  const dir = await laravelFixture();
+  await writeFile(join(dir, "storage/app/leftover.txt"), "x");
+  const whole = (await fileCandidates(dir, "laravel")).find((c) => c.path === "storage/app");
+  assert.equal(whole.include, false, "with disks (public, private...), the whole folder isn't chosen for you");
+  assert.equal(whole.whole, true);
+
+  // Older Laravel: files directly in storage/app, no disk folders.
+  const old = await mkdtemp(join(tmpdir(), "agouti-oldlaravel-"));
+  await mkdir(join(old, "storage/app"), { recursive: true });
+  await writeFile(join(old, "storage/app/invoice.pdf"), "x");
+  assert.deepEqual((await fileCandidates(old, "laravel")).find((c) => c.path === "storage/app"), { path: "storage/app", include: true, note: "files directly inside" });
+
+  // Both chosen: only the outer folder is kept.
+  assert.deepEqual(await validateFolders(dir, ["storage/app/private", "storage/app", "storage/app/public"]), ["storage/app"]);
+  assert.deepEqual(await validateFolders(dir, ["storage/app/public", "storage/app/private"]), ["storage/app/public", "storage/app/private"]);
+});

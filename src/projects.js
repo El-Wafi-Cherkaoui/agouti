@@ -50,7 +50,13 @@ export async function validateFolders(dir, folders) {
     const stored = isWindows() ? rel.replace(/\\/g, "/") : rel;
     if (!out.includes(stored)) out.push(stored);
   }
-  return out;
+  return withoutNested(out);
+}
+
+// A folder inside another chosen folder is already backed up with it: keep only the
+// outer one, so no file is in a backup twice.
+export function withoutNested(folders) {
+  return folders.filter((f) => !folders.some((o) => o !== f && f.startsWith(`${o}/`)));
 }
 
 // Writes the app's credentials file and checks the connection with it.

@@ -265,7 +265,7 @@ async function askFiles(ask, dir, app) {
     info(dim("\nMeasuring folders..."));
     const choices = [];
     for (const c of candidates) {
-      const s = c.include ? await dirStats(join(dir, c.path)) : null;
+      const s = c.include || c.whole ? await dirStats(join(dir, c.path)) : null;
       const detail = s ? `${formatBytes(s.bytes)} · ${s.files.toLocaleString("en-US")} ${s.files === 1 ? "file" : "files"}` : `(${c.reason})`;
       choices.push({ value: c.path, name: `${c.path.padEnd(22)} ${dim(detail)}${c.note ? dim(` · ${c.note}`) : ""}`, checked: c.include });
     }
@@ -279,6 +279,8 @@ async function askFiles(ask, dir, app) {
     });
     try {
       const folders = await validateFolders(dir, [...chosen, ...extra.split(",")]);
+      const inside = chosen.filter((f) => !folders.includes(f));
+      if (inside.length) info(dim(`Already included in a chosen folder, so not listed twice: ${inside.join(", ")}`));
       if (!folders.length) warn("No folders selected: only the database will be backed up.");
       return folders;
     } catch (err) {

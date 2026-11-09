@@ -23,11 +23,18 @@ export async function fileCandidates(dir, framework) {
   if (framework !== "laravel") return [];
   const out = [];
   // Each folder under storage/app is a disk (public, private, or custom ones).
-  for (const name of await subdirs(join(dir, "storage/app"))) {
-    out.push({ path: `storage/app/${name}`, include: true });
+  const disks = await subdirs(join(dir, "storage/app"));
+  for (const name of disks) out.push({ path: `storage/app/${name}`, include: true });
+  // Older Laravel keeps private files directly in storage/app. Backing up that folder
+  // means all of it, the disks above included (and anything else in there, such as
+  // an app's own backups), so with disks it's offered but not chosen.
+  if (await hasLooseFiles(join(dir, "storage/app"))) {
+    out.push(
+      disks.length
+        ? { path: "storage/app", include: false, whole: true, note: "the whole folder, the ones above included" }
+        : { path: "storage/app", include: true, note: "files directly inside" },
+    );
   }
-  // Older Laravel keeps private files directly in storage/app.
-  if (await hasLooseFiles(join(dir, "storage/app"))) out.push({ path: "storage/app", include: true, note: "files directly inside" });
   for (const [path, reason] of [
     ["storage/logs", "logs"],
     ["storage/framework", "cache"],
