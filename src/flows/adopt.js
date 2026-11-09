@@ -2,7 +2,7 @@
 // the backups are restored here (into empty folders and an empty database) and set
 // up to be backed up again, as they were on the old server.
 import { readdir } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { ago } from "../app.js";
 import { requireConfig } from "../config.js";
 import { createBackupUser } from "../mysql.js";
@@ -83,7 +83,7 @@ export async function bringBack(ask, found, { p = paths() } = {}) {
     info(`
 Agouti will restore ${bold(found.name)} as it was on ${bold(when(point))}:
   · database ${bold(dbName)} on this server (created if needed; must be empty)
-  · ${d.files.map((f) => bold(join(dir, f))).join(", ") || "no folders"} (must be empty)
+  · ${d.files.map((f) => bold(resolve(dir, f))).join(", ") || "no folders"} (must be empty)
 `);
     const next = await ask.select({
       message: "Go ahead?",
@@ -120,7 +120,7 @@ Agouti will restore ${bold(found.name)} as it was on ${bold(when(point))}:
   const steps = [
     ...(codeThere ? [] : [`Deploy ${found.name}'s code into ${dir}.`]),
     ...(d.framework === "laravel" ? ["Install it as usual (composer install, php artisan storage:link)."] : []),
-    `In its .env, set DB_DATABASE=${dbName} and a database user that can write: the old server's MySQL users aren't in the backup.`,
+    `In its .env, set the database to ${dbName}${d.framework === "laravel" ? ` (DB_DATABASE)` : ""} and a database user that can write: the old server's MySQL users aren't in the backup.`,
     "Point the domain at this server.",
   ];
   info(dim(`\nNext:\n${steps.map((x, i) => `  ${i + 1}. ${x}`).join("\n")}`));

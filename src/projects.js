@@ -35,28 +35,51 @@ export async function validateAppDir(dir, config) {
   return dir;
 }
 
-// Folders are stored relative to the app, and must stay inside it.
+// Folders inside the app are stored relative to it (storage/app/public). A folder
+// outside it (uploads kept in C:\SchoolClinic\data\uploads, /srv/shop-uploads) is
+// given and stored as a full path. It can't hold the app itself, which would put the
+// code in the backup and let a restore with --delete reach it.
 export async function validateFolders(dir, folders) {
   const out = [];
   for (const f of folders.map((x) => x.trim()).filter(Boolean)) {
-    const rel = relative(dir, resolve(dir, f));
-    if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new UserError(`"${f}" must be a folder inside ${dir}.`);
-    try {
-      if (!(await stat(join(dir, rel))).isDirectory()) throw new Error();
-    } catch {
-      throw new UserError(`${join(dir, rel)} isn't an existing folder.`);
+    const full = resolve(dir, f);
+    const rel = relative(dir, full);
+    const outside = rel.startsWith("..") || isAbsolute(rel);
+    if (!rel) throw new UserError(`"${f}" is the app folder itself. Choose the folders inside it that hold uploaded files.`);
+    if (outside && !isAbsolute(f)) {
+      throw new UserError(`"${f}" isn't inside ${dir}.`, `For a folder outside the app, give its full path (${isWindows() ? "C:\\Data\\uploads" : "/srv/uploads"}).`);
     }
-    // agouti.yml keeps / on every system (storage/app/public, not storage\app\public).
-    const stored = isWindows() ? rel.replace(/\\/g, "/") : rel;
-    if (!out.includes(stored)) out.push(stored);
+    if (outside && !relative(full, dir).startsWith("..") && !isAbsolute(relative(full, dir))) {
+      throw new UserError(`${full} contains the app folder, so the app's code would be backed up too.`, "Choose the folder that holds the uploaded files.");
+    }
+    try {
+      if (!(await stat(full)).isDirectory()) throw new Error();
+    } catch {
+      throw new UserError(`${full} isn't an existing folder.`);
+    }
+    // agouti.yml keeps / inside the app on every system (storage/app/public, not
+    // storage\app\public); a folder outside keeps the system's own full path.
+    const stored = outside ? stripTrailing(full) : isWindows() ? rel.replace(/\\/g, "/") : rel;
+    if (!out.some((o) => samePath(o, stored))) out.push(stored);
   }
   return withoutNested(out);
 }
 
+const stripTrailing = (path) => path.replace(isWindows() ? /(?<!^[A-Za-z]:)[\\/]+$/ : /(?<!^)\/+$/, "");
+// Windows paths aren't case-sensitive: C:\Data is c:\data.
+const samePath = (a, b) => (isWindows() && isAbsolute(a) ? a.toLowerCase() === b.toLowerCase() : a === b);
+
 // A folder inside another chosen folder is already backed up with it: keep only the
-// outer one, so no file is in a backup twice.
+// outer one, so no file is in a backup twice. Relative folders use /, full paths the
+// system's own separator.
 export function withoutNested(folders) {
-  return folders.filter((f) => !folders.some((o) => o !== f && f.startsWith(`${o}/`)));
+  const within = (f, o) => {
+    if (isAbsolute(f) !== isAbsolute(o) || samePath(f, o)) return false;
+    const sep = isAbsolute(o) && isWindows() ? "\\" : "/";
+    const prefix = o.endsWith(sep) ? o : `${o}${sep}`;
+    return isWindows() && isAbsolute(o) ? f.toLowerCase().startsWith(prefix.toLowerCase()) : f.startsWith(prefix);
+  };
+  return folders.filter((f) => !folders.some((o) => within(f, o)));
 }
 
 // Writes the app's credentials file and checks the connection with it.

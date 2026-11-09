@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, parse, relative } from "node:path";
 import { test } from "node:test";
-import { detectApp, dirStats, fileCandidates, formatBytes, suggestName } from "../src/detect.js";
+import { detectApp, dirStats, fileCandidates, findApps, formatBytes, suggestName } from "../src/detect.js";
 import { databaseSettingsFrom } from "../src/envfile.js";
 import { backupUserName, backupUserSql, clientFlavor, dumpClient, mysqlClient, optionFileContent } from "../src/mysql.js";
 import { validateFolders } from "../src/projects.js";
@@ -79,6 +79,16 @@ test(".env: DB_URL, unsupported engines and unresolved variables", () => {
   assert.throws(() => databaseSettingsFrom("APP_KEY=x"), /no database settings/);
 });
 
+test(".env of Node apps: DATABASE_URL (Prisma), DB_NAME/DB_USER/DB_PASS, mysql2", () => {
+  const prisma = databaseSettingsFrom('NEXTAUTH_SECRET=hush\nDATABASE_URL="mysql://root@127.0.0.1:3306/maintenance_card?connection_limit=5"');
+  assert.deepEqual([prisma.connection, prisma.host, prisma.port, prisma.database, prisma.username, prisma.password], ["mysql", "127.0.0.1", 3306, "maintenance_card", "root", ""]);
+  assert.ok(!JSON.stringify(prisma).includes("hush"));
+  const node = databaseSettingsFrom("PORT=8083\nDB_HOST=localhost\nDB_NAME=school_clinic\nDB_USER=clinic_app\nDB_PASS=pw\nDB_DIALECT=mysql2\nJWT_SECRET=x");
+  assert.deepEqual([node.connection, node.database, node.username, node.password], ["mysql", "school_clinic", "clinic_app", "pw"]);
+  assert.throws(() => databaseSettingsFrom("DATABASE_URL=postgresql://u@h/db"), /uses postgresql/);
+  assert.throws(() => databaseSettingsFrom("DATABASE_URL=not a url"), /DATABASE_URL in .env isn't a valid URL/);
+});
+
 test("option file escapes the password and never needs the command line", () => {
   const txt = optionFileContent({ host: "127.0.0.1", port: 3306, username: "shop", password: 'a"b\\c #d' });
   assert.match(txt, /^\[client\]$/m);
@@ -114,6 +124,61 @@ test("folders must exist inside the app", async () => {
   assert.deepEqual(await validateFolders(dir, ["storage/app/public", " ./storage/app/public/ ", ""]), ["storage/app/public"]);
   await assert.rejects(validateFolders(dir, ["../etc"]), /inside/);
   await assert.rejects(validateFolders(dir, ["nope"]), /isn't an existing folder/);
+});
+
+test("a folder outside the app is given as a full path, and kept as one", async () => {
+  const dir = await laravelFixture();
+  const uploads = await mkdtemp(join(tmpdir(), "agouti-uploads-"));
+  assert.deepEqual(await validateFolders(dir, ["storage/app/public", `${uploads}/`]), ["storage/app/public", uploads]);
+  await assert.rejects(validateFolders(dir, [relative(dir, uploads)]), (e) => /isn't inside/.test(e.message) && /give its full path/.test(e.hint), "a ../ path is more likely a mistake");
+  await assert.rejects(validateFolders(dir, [dirname(dir)]), /contains the app folder/, "the folder above would hold the code");
+  await assert.rejects(validateFolders(dir, [parse(dir).root]), /contains the app folder/);
+  await assert.rejects(validateFolders(dir, [dir]), /the app folder itself/);
+  await assert.rejects(validateFolders(dir, [join(uploads, "nope")]), /isn't an existing folder/);
+  // Inside the app, a full path is stored relative like the others.
+  assert.deepEqual(await validateFolders(dir, [join(dir, "storage/app/private")]), ["storage/app/private"]);
+  // One chosen inside another outside folder: only the outer one.
+  await mkdir(join(uploads, "photos"));
+  assert.deepEqual(await validateFolders(dir, [join(uploads, "photos"), uploads]), [uploads]);
+});
+
+test("Node and Next.js apps: detected from package.json, with their upload folders offered", async () => {
+  const next = await mkdtemp(join(tmpdir(), "agouti-next-"));
+  await writeFile(join(next, "package.json"), JSON.stringify({ dependencies: { next: "^14.2.3", react: "18" } }));
+  for (const d of ["public/uploads/2026", "public/icons", "logs", "src", "node_modules/x"]) await mkdir(join(next, d), { recursive: true });
+  await writeFile(join(next, ".env"), "DATABASE_URL=mysql://root@127.0.0.1/mc");
+  assert.deepEqual(await detectApp(next), { framework: "nextjs", label: "Next.js 14", envFile: join(next, ".env") });
+  assert.deepEqual(await fileCandidates(next, "nextjs"), [
+    { path: "public/uploads", include: true },
+    { path: "logs", include: false, reason: "logs" },
+  ]);
+
+  const node = await mkdtemp(join(tmpdir(), "agouti-node-"));
+  await writeFile(join(node, "package.json"), JSON.stringify({ main: "server.js", dependencies: { express: "^4" } }));
+  assert.deepEqual(await detectApp(node), { framework: "node", label: "Node.js app", envFile: null });
+  assert.deepEqual(await fileCandidates(node, "node"), [], "nothing found: the uploads may be outside the app");
+
+  // A package.json with nothing to run (a tooling file) isn't an app.
+  const tooling = await mkdtemp(join(tmpdir(), "agouti-tooling-"));
+  await writeFile(join(tooling, "package.json"), JSON.stringify({ name: "x" }));
+  assert.equal((await detectApp(tooling)).framework, null);
+});
+
+test("apps are found one folder deeper when the top one isn't an app (project/backend)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agouti-wwwroot-"));
+  const laravel = await laravelFixture();
+  await mkdir(join(root, "iso-cloud/frontend/dist"), { recursive: true });
+  await rename(laravel, join(root, "iso-cloud/backend"));
+  await mkdir(join(root, "shop"));
+  await writeFile(join(root, "shop/package.json"), JSON.stringify({ scripts: { start: "node ." } }));
+  await mkdir(join(root, "shop/node_modules/deep"), { recursive: true });
+  await writeFile(join(root, "shop/node_modules/deep/package.json"), JSON.stringify({ main: "x.js" }));
+  const found = await findApps([root]);
+  assert.deepEqual(found.map((a) => [a.dir, a.framework]), [
+    [join(root, "iso-cloud/backend"), "laravel"],
+    [join(root, "shop"), "node"],
+  ]);
+  assert.equal(suggestName(join(root, "iso-cloud/backend")), "iso-cloud");
 });
 
 test("names and sizes", () => {

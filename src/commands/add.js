@@ -16,8 +16,9 @@ In a terminal, with no database options, Agouti asks everything step by step
 (including whether it may read the app's .env file).
 
 Database (non-interactive), one of:
-  --read-env           Read the DB_* settings from the app's .env. Only DB_* lines
-                       are kept; the password is stored in a file only root
+  --read-env           Read the database settings from the app's .env (DB_* or
+                       DATABASE_URL). Only those lines are kept; the password
+                       is stored in a file only root
                        (Windows: Administrators) can read.
   --db-name <name>     Connect with these details instead. Also --db-host
                        (default 127.0.0.1), --db-port (3306), --db-user.

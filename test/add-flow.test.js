@@ -67,7 +67,7 @@ test("reading .env: explained first, then only DB settings saved, password in a 
 
   // The explanation came before the question, and covers what, where, how serious, what we suggest.
   assert.ok(out.indexOf("never stored") < out.indexOf("Connected:"));
-  for (const phrase of [/APP_KEY/, /only the DB_\* lines/, /readable by root only/, /How serious is this/, /What we suggest/]) assert.match(out, phrase);
+  for (const phrase of [/APP_KEY/, /only the database lines \(DB_\*, or DATABASE_URL/, /readable by root only/, /How serious is this/, /What we suggest/]) assert.match(out, phrase);
   assert.match(out, /Connected: MySQL 8\.0 · shop_prod · 62 tables · 48 MB/);
 
   const project = (await loadConfig(p)).projects.shop;

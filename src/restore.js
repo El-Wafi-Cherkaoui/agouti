@@ -11,7 +11,7 @@ import { dumpFilter, loadDump, readDump } from "./dump.js";
 import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { chmod, chown, copyFile, lstat, mkdir, readdir, rename, rm, statfs, utimes } from "node:fs/promises";
-import { dirname, join, parse, relative } from "node:path";
+import { dirname, isAbsolute, join, parse, relative } from "node:path";
 import { APP_FILE, backupApps } from "./backup.js";
 import { requireConfig, writeAtomic } from "./config.js";
 import { id, installClientHint, mysqlClient, optionFileContent, query, str } from "./mysql.js";
@@ -118,7 +118,7 @@ function guessDescription(app) {
     app: app.name,
     path,
     database: { engine: "mysql", name: db ? stdinPath(db.paths[0]).slice(1).replace(/\.sql$/, "") : app.name },
-    files: folders.map((f) => relativePosix(path, f)),
+    files: folders.map((f) => (isOutside(relativePosix(path, f)) ? f : relativePosix(path, f))),
     guessed: true,
   };
 }
@@ -466,11 +466,12 @@ async function restoreFiles(point, project, { bin, env, mode, origin, target, on
     // never to the whole app (which would delete the code), and skips what this
     // backup left out on purpose (it isn't in the snapshot, but must not be deleted).
     const rel = relative(origin, folder);
-    const dest = mode === "copy" ? join(target, rel.startsWith("..") ? outsidePath(folder) : rel) : destination(folder, origin, project.path);
+    const outside = isOutside(rel);
+    const dest = mode === "copy" ? join(target, outside ? outsidePath(folder) : rel) : destination(folder, origin, project.path);
     try {
       // New server: the folders mkdir creates would belong to root, and the app
       // couldn't write into them. Afterwards they get the owner the backup recorded.
-      const created = mode === "new" ? await missingDirs(dest, project.path) : [];
+      const created = mode === "new" ? await missingDirs(dest, outside ? parse(dest).root : project.path) : [];
       await mkdir(dest, { recursive: true });
       // --sparse: runs of zeros stay holes, so a sparse file (a VM image, a database
       // file) takes the space it did, not its full size. Contents are identical.
@@ -482,9 +483,9 @@ async function restoreFiles(point, project, { bin, env, mode, origin, target, on
             onEvent({ type: "progress", part: "files", bytesDone: m.bytes_restored ?? 0, totalBytes: m.total_bytes ?? 0, percent: m.percent_done });
         },
       });
-      if (created.length) await applyRecordedOwners(created, { bin, env, snapshot: point.files.snapshot, toBackup: (d) => join(origin, relative(project.path, d)) });
+      if (created.length) await applyRecordedOwners(created, { bin, env, snapshot: point.files.snapshot, toBackup: (d) => (outside ? d : join(origin, relative(project.path, d))) });
       const bad = await markDamaged(dest, r.errors);
-      damaged.push(...bad.map((item) => join(rel.startsWith("..") ? folder : rel, item)));
+      damaged.push(...bad.map((item) => join(outside ? folder : rel, item)));
       if (r.code !== 0 && !bad.length) failed.push(`${folder}: ${cleanRestic(r.stderr)}`);
     } catch (err) {
       failed.push(`${folder}: ${err.message}`);
@@ -567,8 +568,12 @@ async function markDamaged(dest, errors) {
 // Where a backed-up folder goes when the app now lives in `path` (it lived in `origin`).
 function destination(folder, origin, path) {
   const rel = relative(origin, folder);
-  return rel.startsWith("..") ? folder : join(path, rel);
+  return isOutside(rel) ? folder : join(path, rel);
 }
+
+// relative() leads up (..) out of the app, or, on Windows, is a full path when the
+// folder is on another drive (D:\uploads beside C:\inetpub\shop).
+const isOutside = (rel) => rel.startsWith("..") || isAbsolute(rel);
 
 // True if dir holds any file other than .gitignore (which a fresh `git clone` of a
 // Laravel app puts in storage/app/*).
@@ -616,7 +621,7 @@ export async function restoreFilesByPath(app, pointId, filePaths, { p = paths(),
     throw new UserError(pointId && pointId !== "latest" ? `No files in restore point ${pointId} of ${app}.` : `${app} has no files backed up yet.`);
   const target = copyFolder(p, app, point.id);
   // Files outside the app (it was moved since) keep their full path.
-  const inside = filePaths.every((f) => !relative(project.path, f).startsWith(".."));
+  const inside = filePaths.every((f) => !isOutside(relative(project.path, f)));
   // Outside: from the top of the file's drive (Windows) or of the system. On
   // Windows the snapshot's own top folder (/C) can't be restored as such.
   const base = inside ? project.path : parse(filePaths[0]).root;

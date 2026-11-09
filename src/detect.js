@@ -1,13 +1,22 @@
 // Finds out what kind of app lives in a directory and which folders hold its
-// uploaded files. Reads only structure (file names, composer.json/lock), never .env.
+// uploaded files. Reads only structure (file names, composer.json/lock, package.json), never .env.
 import { lstat, readFile, readdir, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 export async function detectApp(dir) {
   const composer = await readJson(join(dir, "composer.json"));
   const requiresLaravel = composer?.require?.["laravel/framework"];
   if (requiresLaravel && (await exists(join(dir, "artisan")))) {
     return { framework: "laravel", label: `Laravel ${await laravelVersion(dir)}`.trim(), envFile: join(dir, ".env") };
+  }
+  // Node: a package.json with something to run. Next.js is told apart (its own
+  // public/ folder is where such apps tend to keep uploads).
+  const pkg = await readJson(join(dir, "package.json"));
+  if (pkg && (pkg.dependencies || pkg.scripts || pkg.main)) {
+    const env = (await exists(join(dir, ".env"))) ? join(dir, ".env") : null;
+    const next = pkg.dependencies?.next ?? pkg.devDependencies?.next;
+    if (next) return { framework: "nextjs", label: `Next.js ${majorOf(next)}`.trim(), envFile: env };
+    return { framework: "node", label: "Node.js app", envFile: env };
   }
   return { framework: null, label: "Unknown framework", envFile: (await exists(join(dir, ".env"))) ? join(dir, ".env") : null };
 }
@@ -18,8 +27,21 @@ async function laravelVersion(dir) {
   return pkg?.version?.replace(/^v/, "").split(".")[0] ?? "";
 }
 
+// "^14.2.3" → "14", "latest" → "".
+const majorOf = (range) => String(range).match(/\d+/)?.[0] ?? "";
+
+// Where Node apps usually keep uploaded files. Only folders that exist are offered;
+// public/ itself isn't, since it's mostly the app's own images and icons.
+const NODE_UPLOADS = ["uploads", "public/uploads", "storage", "storage/uploads", "data", "data/uploads", "files", "media"];
+
 // Folders to offer for backup, with a default on/off choice and a reason.
 export async function fileCandidates(dir, framework) {
+  if (framework === "node" || framework === "nextjs") {
+    const out = [];
+    for (const path of NODE_UPLOADS) if ((await stat(join(dir, path)).catch(() => null))?.isDirectory()) out.push({ path, include: true });
+    if (await exists(join(dir, "logs"))) out.push({ path: "logs", include: false, reason: "logs" });
+    return out;
+  }
   if (framework !== "laravel") return [];
   const out = [];
   // Each folder under storage/app is a disk (public, private, or custom ones).
@@ -75,22 +97,35 @@ export async function dirStats(dir) {
 const APP_ROOTS = process.platform === "win32" ? "C:\\inetpub\\wwwroot;C:\\xampp\\htdocs;C:\\laragon\\www" : "/var/www:/srv";
 
 // Apps under the usual web roots, to offer as choices. AGOUTI_APP_ROOTS overrides (tests).
+// A folder that isn't an app itself is looked into once more: a project often keeps
+// its backend in a subfolder (iso-cloud\backend beside iso-cloud\frontend).
 export async function findApps(roots = (process.env.AGOUTI_APP_ROOTS ?? APP_ROOTS).split(process.platform === "win32" ? ";" : ":")) {
   const apps = [];
   for (const root of roots) {
     for (const name of await subdirs(root)) {
       const dir = join(root, name);
       const app = await detectApp(dir);
-      if (app.framework) apps.push({ dir, ...app });
+      if (app.framework) {
+        apps.push({ dir, ...app });
+        continue;
+      }
+      for (const sub of await subdirs(dir)) {
+        if (["node_modules", "vendor"].includes(sub)) continue;
+        const inner = await detectApp(join(dir, sub));
+        if (inner.framework) apps.push({ dir: join(dir, sub), ...inner });
+      }
     }
   }
   return apps;
 }
 
-// A config-friendly name from a directory: "/var/www/My Shop" → "my-shop".
+// A config-friendly name from a directory: "/var/www/My Shop" → "my-shop". A
+// generic folder name takes its project's: iso-cloud\backend → "iso-cloud".
+const GENERIC = ["backend", "api", "server", "app", "src", "web", "site"];
 export function suggestName(dir) {
+  const name = GENERIC.includes(basename(dir).toLowerCase()) && basename(dirname(dir)) ? basename(dirname(dir)) : basename(dir);
   return (
-    basename(dir)
+    name
       .toLowerCase()
       .replace(/[^a-z0-9_-]+/g, "-")
       .replace(/^-+|-+$/g, "") || "app"

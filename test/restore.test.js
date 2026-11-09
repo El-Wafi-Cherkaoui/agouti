@@ -314,6 +314,51 @@ test("single files are restored next to the app layout; missing ones are reporte
   await assert.rejects(restoreFilesByPath("shop", point, [join(dir, "nope.txt")], { p }), /Not in this restore point/);
 });
 
+test("a folder outside the app: backed up, restored as a copy, in place, and one file at a time", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { root, p, dir, config } = await setup();
+  const uploads = join(root, "clinic-data", "uploads");
+  await mkdir(join(uploads, "2026"), { recursive: true });
+  await writeFile(join(uploads, "2026", "scan.pdf"), randomBytes(300));
+  await writeFile(join(uploads, "2026", "scan.tmp"), "half written");
+  config.projects.shop.files.push(uploads);
+  config.projects.shop.exclude = ["*.tmp"];
+  await saveConfig(config, p);
+  const [b] = await backupApps([], { p });
+  assert.equal(b.files.ok, true);
+
+  const env = await resticEnv(config, p);
+  const pt = (await listPoints("shop", { bin: restic, env })).find((x) => x.id === b.point);
+  assert.ok(pt.files.paths.includes(uploads), "saved under its own full path");
+  const described = JSON.parse(spawnSync(restic, ["dump", "--repo", config.repository, "--password-file", p.recoveryKey, "latest", "/agouti-app.json"], { encoding: "utf8" }).stdout);
+  assert.ok(described.files.includes(uploads), "a new server learns where it lived");
+
+  // Copy: under its full path inside the copy folder, next to the app's own layout.
+  const copy = await restoreApp({ app: "shop", parts: ["files"], point: b.point }, { p });
+  assert.equal(copy.ok, true);
+  assert.equal((await readFile(join(copy.files.path, uploads.replace(/^\/+/, ""), "2026", "scan.pdf"))).length, 300);
+  assert.equal(existsSync(join(copy.files.path, uploads.replace(/^\/+/, ""), "2026", "scan.tmp")), false, "the exclude rule applied to it");
+  await rm(copy.files.path, { recursive: true });
+
+  // Replace: in place, --delete only inside it, and an excluded live file stays.
+  await rm(join(uploads, "2026", "scan.pdf"));
+  await writeFile(join(uploads, "stray.txt"), "added after the backup");
+  await writeFile(join(root, "clinic-data", "beside.txt"), "not backed up, never touched");
+  const r = await restoreApp({ app: "shop", parts: ["files"], mode: "replace", point: b.point }, { p });
+  assert.equal(r.ok, true);
+  assert.ok(r.files.paths.includes(uploads));
+  assert.equal((await readFile(join(uploads, "2026", "scan.pdf"))).length, 300, "deleted file is back");
+  assert.equal(existsSync(join(uploads, "stray.txt")), false);
+  assert.equal(await readFile(join(uploads, "2026", "scan.tmp"), "utf8"), "half written");
+  assert.equal(await readFile(join(root, "clinic-data", "beside.txt"), "utf8"), "not backed up, never touched");
+  assert.match(await readFile(join(dir, "app.php"), "utf8"), /never touched/);
+
+  // One file: under its full path in the copy folder.
+  const [one] = await restoreFilesByPath("shop", b.point, [join(uploads, "2026", "scan.pdf")], { p });
+  assert.equal(one, join(p.dataDir, "restores", `shop-${b.point}`, uploads.replace(/^\/+/, ""), "2026", "scan.pdf"));
+  assert.equal((await readFile(one)).length, 300);
+});
+
 test("retention never lets a safety point push out a regular backup, and drops it after a week", async (t) => {
   if (!restic) return t.skip("restic unavailable");
   const { p, config } = await setup();

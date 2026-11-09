@@ -5,7 +5,7 @@
 // and the interactive app render them.
 import { stat } from "node:fs/promises";
 import { hostname } from "node:os";
-import { basename, join } from "node:path";
+import { basename, resolve } from "node:path";
 import { requireConfig } from "./config.js";
 import { storageReachable } from "./repository.js";
 import { excludePatterns } from "./excludes.js";
@@ -123,7 +123,7 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [], bas
 
   // Files: only what changed since last time is uploaded (restic deduplicates).
   const files = await part(name, "files", onEvent, async (progress) => {
-    const dirs = (project.files ?? []).map((f) => join(project.path, f));
+    const dirs = (project.files ?? []).map((f) => resolve(project.path, f));
     if (!dirs.length) return { ok: true, skipped: true };
     const missing = [];
     for (const d of dirs) if (!(await stat(d).catch(() => null))?.isDirectory()) missing.push(d);

@@ -1,6 +1,6 @@
 // Restoring, interactively ("Restore" in the app, or `sudo agouti restore`), and the
 // output shared with `agouti restore <app> ...`.
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { mysqlClient } from "../mysql.js";
 import { ago } from "../app.js";
 import { requireConfig, writeAtomic } from "../config.js";
@@ -265,7 +265,7 @@ async function singleFile(ask, { app, project, point, bin, env, p }) {
       choices: [
         ...matches.map((m) => ({
           value: m.path,
-          name: relative(project.path, m.path),
+          name: outsideApp(project.path, m.path) ? m.path : relative(project.path, m.path),
           description: `${formatBytes(m.size ?? 0)} · modified ${m.mtime?.slice(0, 16).replace("T", " ")}`,
         })),
         { value: "", name: dim("Search again") },
@@ -277,7 +277,7 @@ async function singleFile(ask, { app, project, point, bin, env, p }) {
     const live = await livePathFor(choice, restored);
     const exists = Boolean(await onDisk(choice));
     const rel = relative(project.path, choice);
-    const keepAt = join(p.dataDir, "restores", `${app}-replaced-${stamp()}`, rel.startsWith("..") ? basename(choice) : rel);
+    const keepAt = join(p.dataDir, "restores", `${app}-replaced-${stamp()}`, outsideApp(project.path, choice) ? basename(choice) : rel);
     const put = await ask.select({
       message: exists ? "Put it back in the app, replacing the live file?" : "Put it back in the app? (it's no longer there)",
       choices: [
@@ -425,3 +425,9 @@ export function printPoints(app, points) {
     info(`  ${pt.id.padEnd(18)}${pt.at.replace("T", " ").slice(0, 16).padEnd(18)}${parts}${localNote(pt.at)}${pt.safety ? "  (saved before a restore)" : ""}${flagNote(pt)}`);
   }
 }
+
+// A file in a folder kept outside the app (or on another drive, on Windows).
+const outsideApp = (dir, path) => {
+  const rel = relative(dir, path);
+  return rel.startsWith("..") || isAbsolute(rel);
+};

@@ -96,9 +96,9 @@ payment API keys, cloud credentials.
 
 ${bold("If you allow it, Agouti will:")}
   • read .env once, now, and never again
-  • keep only the DB_* lines (connection, host, port, database, username,
-    password); every other line is discarded immediately, never stored,
-    logged or sent anywhere
+  • keep only the database lines (DB_*, or DATABASE_URL: host, port,
+    database, username, password); every other line is discarded
+    immediately, never stored, logged or sent anywhere
   • save the database password in ${join(p.projectsDir, `${name}.cnf`)},
     readable by ${admins} only, and pass it to MySQL through that file, never
     on the command line
@@ -125,7 +125,7 @@ async function askDatabase(ask, { app, name, p }) {
       choices: [
         { value: "backup-user", name: "Create a backup user that can't change your data (recommended)", description: "Agouti creates it with a MySQL admin login, or shows you the SQL." },
         ...(app.envFile
-          ? [{ value: "env", name: "Read the details from .env", description: "Uses the app's own database user. Only DB_* lines are kept." }]
+          ? [{ value: "env", name: "Read the details from .env", description: "Uses the app's own database user. Only the database lines are kept." }]
           : []),
         { value: "manual", name: "Enter the details of an existing database user" },
         { value: "cancel", name: "Cancel" },
@@ -156,7 +156,7 @@ async function askDatabase(ask, { app, name, p }) {
 }
 
 async function backupUserSetup(ask, app, p) {
-  const database = (await ask.input({ message: "Database name (the app's DB_DATABASE)", required: true })).trim();
+  const database = (await ask.input({ message: "Database name (the app's DB_DATABASE, DB_NAME or the end of DATABASE_URL)", required: true })).trim();
   const how = await ask.select({
     message: "Create it how?",
     choices: [
@@ -203,7 +203,7 @@ async function createUserNow(ask, { app, database, p }) {
   try {
     const found = await query(conn.file, `SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ${str(database)}`);
     if (!found.ok) throw new UserError(`Couldn't check the database: ${found.error}`);
-    if (!found.rows.length) throw new UserError(`There's no database ${database} on this MySQL server.`, "Check the name (the app's DB_DATABASE) and the server.");
+    if (!found.rows.length) throw new UserError(`There's no database ${database} on this MySQL server.`, "Check the name (in the app's .env) and the server.");
     // On this server: a user that can only log in from it. Elsewhere: from anywhere.
     const local = !admin.host || ["localhost", "127.0.0.1", "::1"].includes(admin.host);
     user = await createBackupUser(conn.file, { app, database, host: local ? "localhost" : "%" });
@@ -275,8 +275,8 @@ async function askFiles(ask, dir, app) {
   for (;;) {
     const extra = await ask.input({
       message: candidates.length
-        ? "Other folders to include (comma-separated, optional)"
-        : "Folders with uploaded files (comma-separated, relative to the app; empty for none)",
+        ? "Other folders to include (comma-separated, optional; a full path for one outside the app)"
+        : "Folders with uploaded files (comma-separated, relative to the app or a full path; empty for none)",
     });
     try {
       const folders = await validateFolders(dir, [...chosen, ...extra.split(",")]);

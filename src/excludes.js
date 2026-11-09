@@ -9,7 +9,7 @@
 //
 // An entry that can't be applied safely is ignored and reported: a typo in the config
 // must never make a backup hold less than it should.
-import { join, posix } from "node:path";
+import { isAbsolute, posix, resolve } from "node:path";
 import { escapePattern, isWindows } from "./platform.js";
 import { UserError } from "./ui.js";
 
@@ -41,7 +41,8 @@ function parseEntry(entry, folders) {
   return { clean, matches };
 }
 
-const relativeFolders = (project) => (project.files ?? []).map((f) => trimSlashes(posix.normalize(f)));
+// A folder outside the app (a full path) is kept as it is: only name entries apply to it.
+const relativeFolders = (project) => (project.files ?? []).map((f) => (isAbsolute(f) ? f : trimSlashes(posix.normalize(f))));
 
 // The --exclude patterns for backing up a project, and the entries that were ignored.
 export function excludePatterns(project) {
@@ -53,7 +54,7 @@ export function excludePatterns(project) {
       ignored.push(`"${entry}": ${parsed.reason}`);
       continue;
     }
-    for (const { folder, rest } of parsed.matches) patterns.push(`${escapeGlob(join(project.path, folder))}/${rest}`);
+    for (const { folder, rest } of parsed.matches) patterns.push(`${escapeGlob(resolve(project.path, folder))}/${rest}`);
   }
   return { patterns: [...new Set(patterns)], ignored };
 }
