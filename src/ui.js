@@ -118,6 +118,12 @@ const localCache = new Map();
 function systemLocal(d) {
   const key = `${process.env.TZ ?? ""}@${Math.floor(d.getTime() / 60000)}`;
   if (!localCache.has(key)) {
+    // Windows has no `date` of its own: one found on the PATH (Git's) may not know
+    // zone names. Node follows Windows' time zone setting there.
+    if (process.platform === "win32") {
+      localCache.set(key, intlLocal(d));
+      return localCache.get(key);
+    }
     const r = spawnSync("date", ["-d", `@${Math.floor(d.getTime() / 1000)}`, "+%Y-%m-%d %H:%M"], { encoding: "utf8", timeout: 2000 });
     localCache.set(key, r.status === 0 ? r.stdout.trim() : intlLocal(d)); // no `date` (or not GNU): Node's rules
   }
