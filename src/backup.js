@@ -110,7 +110,12 @@ async function backupApp(name, project, { bin, env, onEvent, extraTags = [], bas
       },
     );
     if (r.code !== EXIT.OK || !r.summary) {
-      const error = describeFailure(r, basename(argv[0]));
+      // mysqldump.exe still calls itself "mysqldump: " in its messages.
+      const tool = basename(argv[0]).replace(/\.exe$/i, "");
+      let error = describeFailure(r, tool);
+      // restic sometimes exits before passing on the dump's own message, leaving only
+      // "command failed: exit status 2". Ask the dump tool directly why.
+      if (!r.stderr.includes(`${tool}: `) && /exit status/.test(error) && !isStopped()) error = (await dumpError(argv, tool)) ?? error;
       return { ok: false, error, hint: databaseHint(error, project) };
     }
     return { ok: true, snapshot: r.summary.snapshot_id, bytes: r.summary.total_bytes_processed, added: r.summary.data_added };
@@ -276,6 +281,16 @@ async function part(app, name, onEvent, fn, isStopped = () => false) {
   r.seconds = Math.round((Date.now() - started) / 100) / 10;
   onEvent({ type: "part-done", app, part: name, result: r });
   return r;
+}
+
+// Why a dump fails, from the dump tool itself: the same command with --no-data (the
+// tables' structure only, so it's quick and reads no rows). null if it works now.
+export async function dumpError(argv, tool, { timeout = 60_000 } = {}) {
+  const [bin, ...args] = argv;
+  const r = await run(bin, [...args.slice(0, -1), "--no-data", args.at(-1)], { timeout }).catch(() => null);
+  if (!r || r.code === 0) return null;
+  const line = r.stderr.split(/\r?\n/).find((l) => l.includes(`${tool}: `));
+  return line ? line.slice(line.lastIndexOf(`${tool}: `) + tool.length + 2).trim() : null;
 }
 
 // The most useful line from a failed run: the dump tool's own error if there is

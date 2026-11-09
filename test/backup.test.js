@@ -178,3 +178,17 @@ test("restore point ids and relative times", () => {
   assert.equal(ago("2026-11-02T10:00:00Z", now), "yesterday");
   assert.equal(ago("2026-10-30T12:00:00Z", now), "4 days ago");
 });
+
+test("a failed dump whose message restic didn't pass on: the reason is asked from the dump tool", async () => {
+  const { dumpError } = await import("../src/backup.js");
+  const argv = [process.env.AGOUTI_MYSQLDUMP, "--defaults-extra-file=/nowhere.cnf", "--single-transaction", "shop_prod"];
+  process.env.FAIL_DUMP = "1";
+  try {
+    assert.equal(await dumpError(argv, "mysqldump"), "Got error: 1045: Access denied for user 'shop'@'localhost' (using password: YES) when trying to connect");
+  } finally {
+    delete process.env.FAIL_DUMP;
+  }
+  assert.equal(await dumpError(argv, "mysqldump"), null, "works now: nothing to add");
+  // On Windows the tool is mysqldump.exe, but its messages say "mysqldump: ".
+  assert.equal(describeFailure({ code: 1, messages: [], stderr: "subprocess mysqldump: mysqldump: Got error: 2003: Can't connect\n" }, "mysqldump"), "Got error: 2003: Can't connect");
+});
