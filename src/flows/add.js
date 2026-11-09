@@ -108,7 +108,7 @@ ${bold("How serious is this?")} ${yellow("Moderate.")}
   a new way in. But the app's database user can usually change and delete data,
   and a copy of its password would now live in a second place on this server.
 
-${bold("What we suggest:")} a dedicated ${bold("read-only backup user")}.
+${bold("What we suggest:")} a dedicated ${bold("backup user")}.
   Backups are exactly the same, but if that password ever leaks, it can't be
   used to change or delete your data, and changing the app's own password
   later won't break your backups. Agouti can create it for you.
@@ -123,7 +123,7 @@ async function askDatabase(ask, { app, name, p }) {
     const method = await ask.select({
       message: "How should Agouti connect to the database?",
       choices: [
-        { value: "backup-user", name: "Create a read-only backup user (recommended)", description: "Agouti creates it with a MySQL admin login, or shows you the SQL." },
+        { value: "backup-user", name: "Create a backup user that can't change your data (recommended)", description: "Agouti creates it with a MySQL admin login, or shows you the SQL." },
         ...(app.envFile
           ? [{ value: "env", name: "Read the details from .env", description: "Uses the app's own database user. Only DB_* lines are kept." }]
           : []),
@@ -179,6 +179,7 @@ Run this as a MySQL admin (on most servers: ${bold(process.platform === "win32" 
 ${backupUserSql({ database, username, password, flavor: await clientFlavor() })}
 
 ${dim("It can read the database (all mysqldump needs) but can't change your data: no INSERT, UPDATE, DELETE or DROP TABLE.")}
+${dim("MySQL has no read-only permission for triggers and scheduled events, so to back them up it can also add or remove those.")}
 ${dim("The password was generated just now; Agouti will store it, you don't need to.")}
 `);
   const done = await ask.select({
@@ -209,7 +210,7 @@ async function createUserNow(ask, { app, database, p }) {
   } finally {
     await conn.cleanup();
   }
-  ok(`Created ${bold(user.username)}: it can read ${database}, and can't change anything.`);
+  ok(`Created ${bold(user.username)}: it can read ${database} but can't change your data.`);
   if (!user.routines) warn(routinesWarning(user.username));
   return { host: admin.host ?? server.host, port: admin.port ?? server.port, database, username: user.username, password: user.password };
 }

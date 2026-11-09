@@ -86,11 +86,11 @@ test("option file escapes the password and never needs the command line", () => 
   assert.match(optionFileContent({ socket: "/run/mysqld/mysqld.sock", username: "u", password: "" }), /^socket=/m);
 });
 
-test("backup user SQL is read-only and quoted", () => {
+test("backup user SQL can't change data and is quoted", () => {
   const sql = backupUserSql({ database: "shop`prod", password: "it's" });
   assert.match(sql, /IDENTIFIED BY 'it''s'/);
-  assert.match(sql, /GRANT SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT ON `shop``prod`\.\*/);
-  assert.doesNotMatch(sql, /INSERT|UPDATE|DELETE|DROP|ALL PRIVILEGES/);
+  assert.match(sql, /GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON `shop``prod`\.\*/);
+  assert.doesNotMatch(sql, /INSERT|UPDATE|DELETE|DROP|ALL PRIVILEGES|LOCK TABLES/);
 });
 
 test("Laravel is detected and its upload folders offered, logs and cache excluded", async () => {

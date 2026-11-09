@@ -162,7 +162,7 @@ export function copyFolder(p, app, pointId) {
 }
 
 // Restoring a database needs a user that can create and drop databases; the
-// read-only backup user can't. By default: root through the local socket (how
+// backup user can't. By default: root through the local socket (how
 // MySQL and MariaDB are set up on Debian and Ubuntu: root on the server is root
 // in MySQL). Or a given admin user. Writes a temporary root-only option file.
 export async function adminConnection(project, { user, password, host, port, p = paths() } = {}) {

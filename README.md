@@ -70,7 +70,7 @@ Detected: Laravel 11
   [what Agouti would read and keep, how serious it is, what we suggest]
 
 ? How should Agouti connect to the database?
-❯ Create a read-only backup user (recommended)
+❯ Create a backup user that can't change your data (recommended)
   Read the details from .env
   Enter the details of an existing database user
 
@@ -85,7 +85,7 @@ Detected: Laravel 11
 ✓ Added shop
 ```
 
-Agouti never reads `.env` without asking. If you allow it, it keeps only the `DB_*` lines and discards the rest. Even then, we recommend the read-only backup user: Agouti gives you the SQL, and a leaked backup password can't change or delete your data.
+Agouti never reads `.env` without asking. If you allow it, it keeps only the `DB_*` lines and discards the rest. Even then, we recommend the backup user: Agouti creates it (or gives you the SQL), and a leaked backup password can't change or delete your data. It can read the app's database, and, because MySQL has no read-only permission for them, add or remove its triggers and scheduled events.
 
 Repeat for every app on the server. They all share one repository and one schedule.
 
@@ -226,11 +226,11 @@ Found 1 app in the backups:
   ✓ database  restored into shop_prod · 62 of 62 tables · 41s
   ✓ files     17,420 files · 3.1 GB → /var/www/shop/storage/app/public, /var/www/shop/storage/app/private
 ? Keep backing up shop on this server? Yes
-✓ shop is set up on this server (backup user agouti_shop, read-only).
+✓ shop is set up on this server (backup user agouti_shop, can't change your data).
 ? Turn on daily automatic backups? Yes
 ```
 
-Deploy the code first if you can (`git clone` refuses a folder that isn't empty). Agouti only restores into an empty database and empty folders, so nothing on the new server is overwritten. It creates a read-only MySQL user for the app, so backups go on as before.
+Deploy the code first if you can (`git clone` refuses a folder that isn't empty). Agouti only restores into an empty database and empty folders, so nothing on the new server is overwritten. It creates a MySQL backup user for the app, so backups go on as before.
 
 Before a risky deploy, make a restore point by hand:
 

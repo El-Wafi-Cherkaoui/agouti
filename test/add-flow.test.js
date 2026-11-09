@@ -44,7 +44,7 @@ test("reading .env: explained first, then only DB settings saved, password in a 
       "select",
       /How should Agouti connect/,
       (o) => {
-        assert.match(o.choices[0].name, /read-only backup user \(recommended\)/);
+        assert.match(o.choices[0].name, /backup user that can't change your data \(recommended\)/);
         return "env";
       },
     ],
@@ -92,7 +92,7 @@ test("reading .env: explained first, then only DB settings saved, password in a 
   assert.ok(!(await readFile(argsLog, "utf8")).includes("a#ss"), "password must never be on the command line");
 });
 
-test("read-only backup user: SQL shown, failed connection fixed in place", async () => {
+test("backup user: SQL shown, failed connection fixed in place", async () => {
   const { p, dir } = await setup();
   const ask = scripted([
     ["input", /Name/, "shop"],
@@ -137,7 +137,7 @@ test("read-only backup user: SQL shown, failed connection fixed in place", async
   assert.match(await readFile(project.database.credentials, "utf8"), new RegExp(`password="${generated}"`), "kept the generated password");
 });
 
-test("read-only backup user created by Agouti: an admin login is asked once and kept nowhere", async () => {
+test("backup user created by Agouti: an admin login is asked once and kept nowhere", async () => {
   const { p, dir } = await setup();
   // A server where root has a password (Windows, most non-Debian servers), and no database "missing".
   const orig = process.env.AGOUTI_MYSQL;
@@ -186,7 +186,7 @@ exec "${orig}" "$@"
   assert.match(out, /Created agouti_shop: it can read shop_prod/);
   const args = await readFile(argsLog, "utf8");
   assert.match(args, /CREATE USER IF NOT EXISTS 'agouti_shop'@'localhost'/);
-  assert.match(args, /GRANT SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT ON `shop_prod`\.\* TO 'agouti_shop'@'localhost'/);
+  assert.match(args, /GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON `shop_prod`\.\* TO 'agouti_shop'@'localhost'/);
   assert.ok(!args.includes("r00t-secret"), "the admin password is never on the command line");
 
   const project = (await loadConfig(p)).projects.shop;

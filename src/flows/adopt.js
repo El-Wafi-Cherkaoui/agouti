@@ -110,7 +110,7 @@ Agouti will restore ${bold(found.name)} as it was on ${bold(when(point))}:
   const result = await runRestore({ app: found.name, mode: "new", project, origin: d.path, admin, point: point.id, parts }, { p });
   if (!result.ok) return;
 
-  if (await ask.confirm({ message: `Keep backing up ${found.name} on this server? (creates a read-only MySQL user for it)`, default: true })) {
+  if (await ask.confirm({ message: `Keep backing up ${found.name} on this server? (creates a MySQL backup user for it that can't change your data)`, default: true })) {
     await setUp(found.name, { dir, d, project, admin, p });
     const config = await requireConfig(p);
     if (!scheduledTime(config) && (await ask.confirm({ message: "Turn on daily automatic backups?", default: true }))) await scheduleFlow(ask, { p });
@@ -195,7 +195,7 @@ async function choosePoint(ask, app, parts, p, { current, always = false } = {})
   });
 }
 
-// Registers the restored app with a dedicated read-only backup user.
+// Registers the restored app with a dedicated backup user.
 async function setUp(name, { dir, d, project, admin, p }) {
   const conn = await adminConnection(project, { ...admin, p });
   let user;
@@ -209,6 +209,6 @@ async function setUp(name, { dir, d, project, admin, p }) {
   const { check } = await prepareDatabase(name, db, p);
   if (!check.ok) throw new UserError(`The new backup user can't connect: ${check.message}`);
   await saveProject({ name, dir, framework: d.framework, db, source: "restored", files: d.files, exclude: d.exclude }, p);
-  ok(`${bold(name)} is set up on this server (backup user ${user.username}, read-only).`);
+  ok(`${bold(name)} is set up on this server (backup user ${user.username}, can't change your data).`);
   if (!user.routines) warn("The backup user can't see stored procedures, so backups would leave them out. Grant SHOW_ROUTINE if you use any.");
 }

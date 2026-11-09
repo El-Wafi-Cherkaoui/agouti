@@ -157,10 +157,15 @@ export function generatePassword() {
   return randomBytes(24).toString("base64url");
 }
 
-// SQL for a dedicated read-only backup user, scoped to one database. It can read
-// everything mysqldump needs, but can't change or delete anything.
+// SQL for a dedicated backup user, scoped to one database. It can read everything
+// mysqldump needs, but can't change your data (no INSERT, UPDATE, DELETE, DROP TABLE).
+// TRIGGER and EVENT: mysqldump can't see triggers and scheduled events without them,
+// and MySQL has no read-only version, so this user can also add or remove those.
+// (A trigger runs with its creator's rights, so one it adds still can't write data.)
+// No LOCK TABLES: --single-transaction reads a consistent copy without locking, and
+// that grant would let a leaked password freeze the app's writes.
 // SHOW_ROUTINE lets it see stored procedures/functions; without it mysqldump
-// silently leaves them out. It's read-only too.
+// silently leaves them out. It's read-only.
 // flavor: which server the SQL is for (see clientFlavor). The grant that lets a
 // read-only user see stored procedures is different on each and an error on the
 // other, which would stop a pasted script halfway. Unknown: both, as comments.
@@ -171,7 +176,7 @@ export function backupUserSql({ database, username, host = "localhost", password
   return [
     `CREATE USER IF NOT EXISTS ${who} IDENTIFIED BY ${str(password)};`,
     `ALTER USER ${who} IDENTIFIED BY ${str(password)};`,
-    `GRANT SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT ON ${id(database)}.* TO ${who};`,
+    `GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON ${id(database)}.* TO ${who};`,
     ...(flavor === "mariadb"
       ? [`GRANT SELECT ON mysql.proc TO ${who};`]
       : flavor === "mysql"
@@ -249,7 +254,7 @@ export async function dumpCommand(optionFile, database, { bin = dumpClient() } =
   ];
 }
 
-// Creates (or resets) a read-only backup user for one app, through an admin
+// Creates (or resets) a backup user for one app, through an admin
 // connection: the same privileges as backupUserSql(). One user per app, so
 // setting up a second app never changes the first one's password.
 // host: "localhost" for a local server (socket), "%" for one reached over the network.
@@ -270,7 +275,7 @@ export async function createBackupUser(adminFile, { app, database, host = "local
   const r = await query(
     adminFile,
     `CREATE USER IF NOT EXISTS ${who} IDENTIFIED BY ${str(password)}; ALTER USER ${who} IDENTIFIED BY ${str(password)}; ` +
-      `GRANT SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT ON ${id(database)}.* TO ${who}`,
+      `GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON ${id(database)}.* TO ${who}`,
   );
   if (!r.ok) throw new UserError(`Couldn't create the backup user ${username}: ${r.error}`);
   // Stored procedures: SHOW_ROUTINE on MySQL 8.0.20+, SELECT on mysql.proc on MariaDB.

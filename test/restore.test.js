@@ -577,7 +577,7 @@ test("new server: the app is restored into empty places and set up to be backed 
   const out = await captured(() => restoreFlow(ask, { p })); // the only app: picked without asking
   assert.deepEqual(ask.remaining, []);
   assert.match(out, /✓ database  restored into shop_new · 2 of 2 tables/);
-  assert.match(out, /shop is set up on this server \(backup user agouti_shop, read-only\)/);
+  assert.match(out, /shop is set up on this server \(backup user agouti_shop, can't change your data\)/);
   assert.doesNotMatch(out, /Deploy shop's code/, "the code is there already");
 
   assert.equal(await readFile(join(dbDir, "shop_new", "data.sql"), "utf8"), DUMP);
