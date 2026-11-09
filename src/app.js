@@ -295,6 +295,7 @@ async function showKey(ask, p) {
   if (!(await ask.confirm({ message: "Show the recovery key on screen?", default: true }))) return;
   const key = (await readFile(p.recoveryKey, "utf8")).trim();
   info(`\n  ${bold(key)}\n  ${yellow("Store it outside this server, e.g. in a password manager.")}`);
+  info(dim("  Keep this server's MySQL root password there too: restoring a database here asks for it\n  (unless root logs in without one). A new server needs this key and its own MySQL root password."));
 }
 
 function showError(err) {

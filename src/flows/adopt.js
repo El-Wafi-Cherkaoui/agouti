@@ -12,7 +12,7 @@ import { adminConnection, discoverApps, listPoints, newestBackup } from "../rest
 import { ensureRestic, resticEnv } from "../restic.js";
 import { scheduledTime } from "../schedule.js";
 import { UserError, bold, dim, info, ok, red, warn } from "../ui.js";
-import { askAdmin, pointDetails, pointLabel, runRestore } from "./restore.js";
+import { adminNotice, askAdmin, pointDetails, pointLabel, runRestore } from "./restore.js";
 import { scheduleFlow } from "./schedule.js";
 
 // Apps in the backups that aren't set up on this server.
@@ -61,6 +61,7 @@ export async function bringBack(ask, found, { p = paths() } = {}) {
   const d = found.description;
   info(`\n${bold(found.name)}: last complete backup ${ago(found.completeAt ?? found.at)} on ${found.host}`);
   if (d.guessed) warn("These backups predate app descriptions: the folder and database below are Agouti's best guess. Check them.");
+  await adminNotice({ database: { host: "localhost", port: 3306 } }, p);
 
   // A new server needs both parts. By default the newest real backup that has them:
   // not one saved before a restore, and not one cut short by a failure.

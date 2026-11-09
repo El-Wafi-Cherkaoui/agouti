@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { before, test } from "node:test";
 import { loadConfig, saveConfig } from "../src/config.js";
 import { addFlow } from "../src/flows/add.js";
+import { adminNotice, askAdmin, forgetAdminLogins } from "../src/flows/restore.js";
 import { paths } from "../src/paths.js";
 import { captured, laravelFixture, scripted } from "./helpers.js";
 
@@ -168,7 +169,7 @@ exec "${orig}" "$@"
     ["select", /How should Agouti connect/, "backup-user"],
     ["input", /Database name/, "shop_prod"],
     ["select", /Create it how/, "agouti"],
-    ...admin,
+    // Asked once: the login is kept in memory for the rest of the session.
     ["checkbox", /Which folders/, ["storage/app/public"]],
     ["input", /Other folders/, ""],
     ["confirm", /Add shop/, true],
@@ -182,6 +183,8 @@ exec "${orig}" "$@"
   }
   assert.deepEqual(ask.remaining, []);
   assert.match(out, /This needs a MySQL admin that can create users/);
+  assert.match(out, /How Agouti handles this password:[\s\S]*never saved[\s\S]*never appears on a command line/);
+  assert.match(out, /Using the MySQL login root given earlier \(kept in memory until Agouti closes\)/);
   assert.match(out, /There's no database missing on this MySQL server/);
   assert.match(out, /Created agouti_shop: it can read shop_prod/);
   const args = await readFile(argsLog, "utf8");
@@ -196,6 +199,35 @@ exec "${orig}" "$@"
   assert.match(cnf, /user="agouti_shop"/);
   for (const f of [p.config, project.database.credentials]) assert.ok(!(await readFile(f, "utf8")).includes("r00t-secret"), `${f} holds the admin password`);
   assert.deepEqual((await readdir(p.dataDir).catch(() => [])).filter((f) => f.startsWith("restore-admin")), [], "no admin login file left behind");
+
+  // Next time Agouti starts: server and user are filled in, the password is asked again.
+  const defaults = await readFile(join(p.dataDir, "admin-login.json"), "utf8");
+  assert.deepEqual(JSON.parse(defaults), { "local:3306": { server: "localhost:3307", user: "root" } });
+  assert.ok(!defaults.includes("r00t-secret"), "the saved defaults hold no password");
+  forgetAdminLogins();
+  process.env.AGOUTI_MYSQL = server;
+  const local = { database: { host: "localhost", port: 3306 } };
+  // A restore says early on that the password will be needed...
+  try {
+    assert.match(await captured(() => adminNotice(local, p)), /Restoring the database will ask for a MySQL admin password/);
+  } finally {
+    process.env.AGOUTI_MYSQL = orig;
+  }
+  process.env.AGOUTI_MYSQL = server;
+  const again = scripted([
+    ["input", /MySQL server/, (o) => (assert.equal(o.default, "localhost:3307"), o.default)],
+    ["input", /MySQL admin user/, (o) => (assert.equal(o.default, "root"), o.default)],
+    ["password", /Password of root/, "r00t-secret"],
+  ]);
+  try {
+    const login = await captured(() => askAdmin(again, local, p));
+    assert.match(login, /How Agouti handles this password/);
+    // ...but not once it's known in this session.
+    assert.equal(await captured(() => adminNotice(local, p)), "");
+  } finally {
+    process.env.AGOUTI_MYSQL = orig;
+  }
+  assert.deepEqual(again.remaining, []);
 });
 
 test("cancelling leaves nothing behind, and .env is never read", async () => {

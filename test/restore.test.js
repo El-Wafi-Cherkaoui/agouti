@@ -360,6 +360,7 @@ test("interactive: a copy by default; replacing needs the app's name typed", asy
   const out = await captured(() => restoreFlow(copy, { p }));
   assert.deepEqual(copy.remaining, []);
   assert.match(out, new RegExp(`restored into ${copyDatabaseName("shop_prod", point)} · 2 of 2 tables`));
+  assert.doesNotMatch(out, /will ask for a MySQL admin password/, "root logs in without one here: no warning");
 
   await writeFile(join(dir, "storage/app/public/stray.txt"), "x");
   const cancelled = scripted([

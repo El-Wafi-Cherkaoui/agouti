@@ -3,7 +3,8 @@
 import { basename, dirname, join, relative } from "node:path";
 import { mysqlClient } from "../mysql.js";
 import { ago } from "../app.js";
-import { requireConfig } from "../config.js";
+import { requireConfig, writeAtomic } from "../config.js";
+import { mkdir, readFile } from "node:fs/promises";
 import { formatBytes } from "../detect.js";
 import { paths } from "../paths.js";
 import { isWindows } from "../platform.js";
@@ -38,6 +39,7 @@ export async function restoreFlow(ask, { p = paths(), app } = {}) {
 
   const points = await listPoints(app, { bin, env, flagged: await flaggedPoints(app, p) });
   if (!points.length) throw new UserError(`${app} has no restore points yet.`, `Make one first: "Back up now", or sudo agouti backup ${app}`);
+  await adminNotice(project, p);
 
   const newest = newestBackup(points);
   const point = await ask.select({
@@ -132,38 +134,117 @@ Put the app in maintenance mode first if it's live (Laravel: php artisan down).
   return typed.trim() === app;
 }
 
-// Finds a MySQL user that can create databases: root through the local socket,
-// or one the user gives. Returns { user, password } for restoreApp.
+// Finds a MySQL user that can create databases: root through the local socket
+// (or, on Windows, root without a password), or one the user gives. Returns
+// { user, password, host, port } for adminConnection, or {} for root as is.
 // need: what the admin must be able to do; cancelled: the message when they give up.
+//
+// A login given here is kept in memory for the rest of this run (one menu session),
+// per MySQL server, so a copy restore followed by a replace asks once. Only the
+// server and user name are saved, as next time's defaults; never the password.
+const session = new Map();
+const LOCAL = ["localhost", "127.0.0.1", "::1"];
+const serverKey = (db) => (db.socket ? `socket:${db.socket}` : `${LOCAL.includes(db.host) ? "local" : db.host}:${db.port ?? 3306}`);
+const defaultsFile = (p) => join(p.dataDir, "admin-login.json");
+
+// For tests: as if Agouti had just started.
+export const forgetAdminLogins = () => session.clear();
+
 export async function askAdmin(ask, project, p, { need = "that can create databases", cancelled = "Restore cancelled: no MySQL user to restore with." } = {}) {
-  try {
-    const conn = await adminConnection(project, { p });
-    await conn.cleanup();
-    return {};
-  } catch (err) {
-    if (!(err instanceof UserError) || /isn't installed/.test(err.message)) throw err;
+  const key = serverKey(project.database);
+  const kept = session.get(key);
+  if (kept) {
+    if (await canConnect(project, { ...kept, p })) {
+      info(dim(`Using the MySQL login ${kept.user} given earlier (kept in memory until Agouti closes).`));
+      return kept;
+    }
+    session.delete(key); // its password changed meanwhile
   }
+  if (await canConnect(project, { p })) return {};
+
+  const saved = (await loadDefaults(p))[key];
   info(`
-This needs a MySQL admin ${need}. ${isWindows() ? "Logging in as root without a\npassword didn't work" : "Logging in as root through\nthe local socket didn't work"}, so give one (and its server). The password is
-only used right now and isn't saved.
+This needs a MySQL admin ${need}. ${isWindows() ? "Logging in as root without a\npassword didn't work" : "Logging in as root through\nthe local socket didn't work"}, so give a MySQL admin login (and its server).
 `);
+  explainAdminPassword(p);
   const db = project.database;
   for (;;) {
     const server = (
-      await ask.input({ message: "MySQL server (host or host:port)", default: db.port && db.port !== 3306 ? `${db.host}:${db.port}` : db.host })
+      await ask.input({ message: "MySQL server (host or host:port)", default: saved?.server ?? (db.port && db.port !== 3306 ? `${db.host}:${db.port}` : db.host) })
     ).trim();
     const [host, port = "3306"] = server.split(":");
-    const user = await ask.input({ message: "MySQL admin user", default: "root" });
+    const user = (await ask.input({ message: "MySQL admin user", default: saved?.user ?? "root" })).trim();
     const password = await ask.password({ message: `Password of ${user}`, mask: "*" });
+    const login = { user, password, host, port: Number(port) };
     try {
-      const conn = await adminConnection(project, { user, password, host, port: Number(port), p });
+      const conn = await adminConnection(project, { ...login, p });
       await conn.cleanup();
-      return { user, password, host, port: Number(port) };
+      session.set(key, login);
+      await saveDefaults(p, key, { server, user });
+      return login;
     } catch (err) {
       if (!(err instanceof UserError)) throw err;
       info(`${red("✕")} ${err.message}`);
       if (!(await ask.confirm({ message: "Try again?", default: true }))) throw new UserError(cancelled);
     }
+  }
+}
+
+// What happens to the admin password, said before it's typed.
+function explainAdminPassword(p) {
+  const admins = isWindows() ? "Administrators" : "root";
+  info(`${bold("How Agouti handles this password:")}
+  • It's used only for what you're doing now, and never saved: not in Agouti's
+    settings or credentials files, not in logs, alerts or backups.
+  • While it's needed, it's in a temporary file readable by ${admins} only
+    (${join(p.dataDir, "restore-admin-<number>.cnf")}). MySQL reads it from
+    there, so it never appears on a command line or in the list of running
+    programs. The file is deleted as soon as the work is done (or, if Agouti was
+    cut off, the next time it needs an admin login).
+  • Until you quit Agouti, it stays in memory, so you aren't asked again.
+    Next time, the server and user name are filled in for you; the password isn't.
+  • Only * is shown as you type.
+`);
+}
+
+async function canConnect(project, opts) {
+  try {
+    const conn = await adminConnection(project, opts);
+    await conn.cleanup();
+    return true;
+  } catch (err) {
+    if (!(err instanceof UserError) || /isn't installed/.test(err.message)) throw err;
+    return false;
+  }
+}
+
+// Before the questions: say a database restore will need an admin password, so it
+// doesn't come as a surprise after choosing a restore point. Never fails.
+export async function adminNotice(project, p) {
+  try {
+    if (session.has(serverKey(project.database)) || (await canConnect(project, { p }))) return;
+  } catch {
+    return; // no mysql client: the restore itself says so
+  }
+  info(dim(`Restoring the database will ask for a MySQL admin password (e.g. root's): root can't log in here without one. Restoring files doesn't need it.\n`));
+}
+
+async function loadDefaults(p) {
+  try {
+    return JSON.parse(await readFile(defaultsFile(p), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+async function saveDefaults(p, key, value) {
+  try {
+    const all = await loadDefaults(p);
+    all[key] = value;
+    await mkdir(p.dataDir, { recursive: true });
+    await writeAtomic(defaultsFile(p), JSON.stringify(all, null, 2) + "\n", 0o600);
+  } catch {
+    // only a convenience
   }
 }
 
