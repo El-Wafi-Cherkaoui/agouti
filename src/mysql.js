@@ -1,6 +1,6 @@
 // Talking to MySQL/MariaDB. Credentials always go through a private option file
 // (--defaults-extra-file), never the command line, where `ps` would show them.
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { spawn } from "./children.js";
 import { randomBytes, createHash } from "node:crypto";
@@ -28,10 +28,10 @@ export async function writeOptionFile(file, db) {
 export async function inspectDatabase(optionFile, database, { client = mysqlClient() } = {}) {
   const sql =
     "SELECT VERSION(), COUNT(*), COALESCE(SUM(data_length + index_length), 0) FROM information_schema.tables WHERE table_schema = DATABASE(); SHOW GRANTS";
-  const r = await run(client, [`--defaults-extra-file=${optionFile}`, "--batch", "--skip-column-names", "--connect-timeout=10", "-e", sql, database]);
+  const r = await run(client, [`--defaults-extra-file=${optionFile}`, "--batch", "--skip-column-names", "--connect-timeout=10", "--default-character-set=utf8mb4", "-e", sql, database]);
   if (r.missing) return { ok: false, message: "The mysql client isn't installed, so the connection couldn't be checked.", clientMissing: true };
   if (r.code !== 0) return { ok: false, message: cleanError(r.stderr) };
-  const [first, ...grants] = r.stdout.trim().split("\n");
+  const [first, ...grants] = r.stdout.trim().split(/\r?\n/);
   const [version, tables, bytes] = first.split("\t");
   return { ok: true, version: describeVersion(version), tables: Number(tables), bytes: Number(bytes), routinesVisible: routinesVisible(grants, database) };
 }
@@ -81,7 +81,7 @@ function describeVersion(v = "") {
 }
 
 export function cleanError(stderr) {
-  const line = stderr.split("\n").find((l) => /ERROR/.test(l)) ?? stderr.trim().split("\n").at(-1) ?? "unknown error";
+  const line = stderr.split(/\r?\n/).find((l) => /ERROR/.test(l)) ?? stderr.trim().split(/\r?\n/).at(-1) ?? "unknown error";
   return line.replace(/^(mysql|mariadb): /, "").trim();
 }
 
@@ -90,16 +90,41 @@ export const id = (s) => "`" + String(s).replace(/`/g, "``") + "`";
 export const str = (s) => "'" + String(s).replace(/\\/g, "\\\\").replace(/'/g, "''") + "'";
 
 // Newer MariaDB packages only install mariadb and mariadb-dump, without the mysql names.
+// Windows: programs end in .exe, and the MySQL installer doesn't always put its bin
+// folder on the PATH (a scheduled task's PATH is the system one), so also look in
+// its usual place, newest version first. Returns the full path there.
 const onPath = (name) =>
   (process.env.PATH ?? "").split(delimiter).some((dir) => {
     try {
-      accessSync(join(dir || ".", name), constants.X_OK);
+      accessSync(join(dir || ".", process.platform === "win32" ? `${name}.exe` : name), constants.X_OK);
       return true;
     } catch {
       return false;
     }
   });
-const firstInstalled = (...names) => names.find(onPath) ?? names[0];
+export function windowsInstalls(env = process.env) {
+  const out = [];
+  for (const root of [env.ProgramFiles, env["ProgramFiles(x86)"]].filter(Boolean)) {
+    for (const vendor of ["MySQL", "MariaDB"]) {
+      const dirs = (() => {
+        try {
+          return readdirSync(join(root, vendor));
+        } catch {
+          return [];
+        }
+      })();
+      // "MySQL Server 8.0", "MariaDB 11.4": newest first.
+      for (const d of dirs.sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))) out.push(join(root, vendor, d, "bin"));
+    }
+  }
+  return out;
+}
+const firstInstalled = (...names) => {
+  const found = names.find(onPath);
+  if (found || process.platform !== "win32") return found ?? names[0];
+  for (const dir of windowsInstalls()) for (const n of names) if (existsSync(join(dir, `${n}.exe`))) return join(dir, `${n}.exe`);
+  return names[0];
+};
 
 export const mysqlClient = () => process.env.AGOUTI_MYSQL || firstInstalled("mysql", "mariadb");
 export const dumpClient = () => process.env.AGOUTI_MYSQLDUMP || firstInstalled("mysqldump", "mariadb-dump");
@@ -111,14 +136,17 @@ export async function query(optionFile, sql, { database } = {}) {
     "--batch",
     "--skip-column-names",
     "--connect-timeout=10",
+    // Also keeps the client quiet about an unknown console code page (Windows over SSH).
+    "--default-character-set=utf8mb4",
     "-e",
     sql,
     ...(database ? [database] : []),
   ]);
   if (r.missing) return { ok: false, missing: true, error: "The mysql client isn't installed." };
   if (r.code !== 0) return { ok: false, error: cleanError(r.stderr) };
+  // mysql.exe on Windows ends lines with \r\n.
   const rows = r.stdout
-    .split("\n")
+    .split(/\r?\n/)
     .filter(Boolean)
     .map((l) => l.split("\t"));
   return { ok: true, rows };
@@ -176,6 +204,12 @@ function run(cmd, args) {
   });
 }
 
+// How to get the mysql/mysqldump programs on this system.
+export const installClientHint = () =>
+  process.platform === "win32"
+    ? "They come with MySQL (C:\\Program Files\\MySQL\\MySQL Server <version>\\bin). Install MySQL Server or MySQL Shell, or add that bin folder to the system PATH, and try again."
+    : "Install it (e.g. `apt install mysql-client` or `apt install mariadb-client`) and try again.";
+
 // Shown when routinesVisible() is false.
 export function routinesWarning(username) {
   return [
@@ -192,7 +226,7 @@ export function routinesWarning(username) {
 export async function dumpCommand(optionFile, database, { bin = dumpClient() } = {}) {
   const r = await run(bin, ["--version"]);
   if (r.missing)
-    throw new UserError("mysqldump isn't installed.", "Install it (e.g. `apt install mysql-client` or `apt install mariadb-client`) and try again.");
+    throw new UserError("mysqldump isn't installed.", installClientHint());
   const mariadbClient = /mariadb/i.test(r.stdout);
   return [
     bin,

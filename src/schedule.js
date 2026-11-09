@@ -11,10 +11,13 @@ import { fileURLToPath } from "node:url";
 import { saveConfig, writeAtomic } from "./config.js";
 import { paths } from "./paths.js";
 import { run } from "./restic.js";
+import { isWindows } from "./platform.js";
 import { UserError } from "./ui.js";
 
 export const TIMER = "agouti-backup.timer";
 export const SERVICE = "agouti-backup.service";
+// Windows: a Task Scheduler task instead of a systemd timer.
+export const TASK = "Agouti backup";
 
 const unitDir = (env = process.env) => env.AGOUTI_SYSTEMD_DIR || "/etc/systemd/system";
 const systemctlBin = (env = process.env) => env.AGOUTI_SYSTEMCTL || "systemctl";
@@ -106,6 +109,12 @@ async function systemctl(args, env = process.env) {
 // Installs (or updates) the timer and records the time in the config.
 export async function installSchedule(config, time, { p = paths(), env = process.env } = {}) {
   time = parseTime(time);
+  if (isWindows()) {
+    await installTask(time, { p, env });
+    config.schedule = `daily ${time}`;
+    await saveConfig(config, p);
+    return scheduleStatus(config, { env });
+  }
   requireSystemd(env);
   const { service, timer } = unitFiles(time, { env });
   await writeAtomic(join(unitDir(env), SERVICE), service, 0o644);
@@ -120,6 +129,12 @@ export async function installSchedule(config, time, { p = paths(), env = process
 }
 
 export async function removeSchedule(config, { p = paths(), env = process.env } = {}) {
+  if (isWindows()) {
+    if ((await schtasks(["/Query", "/TN", TASK], env, { check: false })).code === 0) await schtasks(["/Delete", "/TN", TASK, "/F"], env);
+    delete config.schedule;
+    await saveConfig(config, p);
+    return;
+  }
   const dir = unitDir(env);
   const installed = existsSync(join(dir, TIMER));
   if (installed) {
@@ -139,6 +154,7 @@ export async function scheduleStatus(config, { env = process.env } = {}) {
   const time = scheduledTime(config);
   if (!time) return { enabled: false };
   const status = { enabled: true, time };
+  if (isWindows()) return { ...status, ...(await taskStatus(env)) };
   let service;
   try {
     service = await readFile(join(unitDir(env), SERVICE), "utf8");
@@ -164,4 +180,132 @@ export async function scheduleStatus(config, { env = process.env } = {}) {
 // Splits an ExecStart= line as written by unitFiles() (plain words, or "quoted").
 export function splitExec(line) {
   return [...line.matchAll(/"((?:[^"\\]|\\.)*)"|(\S+)/g)].map((m) => (m[1] !== undefined ? m[1].replace(/\\(.)/g, "$1").replace(/%%/g, "%") : m[2]));
+}
+
+// --- Windows: Task Scheduler ---------------------------------------------------
+// The task runs as SYSTEM (no password to store, survives logoff), daily at the
+// time, and late if the server was off then (StartWhenAvailable, like systemd's
+// Persistent=true). Written as XML: schtasks' own options can't set that.
+
+const schtasksBin = (env = process.env) => env.AGOUTI_SCHTASKS || "schtasks";
+
+async function schtasks(args, env = process.env, { check = true } = {}) {
+  let r;
+  try {
+    r = await run(schtasksBin(env), args, { env });
+  } catch (err) {
+    throw new UserError(`Couldn't run schtasks: ${err.message}`);
+  }
+  if (check && r.code !== 0) throw new UserError(`schtasks ${args[0]} failed: ${(r.stderr || r.stdout).trim() || `exit code ${r.code}`}`);
+  return r;
+}
+
+const xmlEscape = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+// Windows command-line quoting (CommandLineToArgvW rules), for the task's arguments.
+export const winArg = (a) => (/^[^\s"]+$/.test(a) ? a : `"${a.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1")}"`);
+
+// Task Scheduler keeps no output, so cmd writes the run's output to this file.
+export const taskLog = (p = paths()) => join(p.dataDir, "last-backup.log");
+
+export function taskXml(time, { command = agoutiCommand(), env = process.env, today = new Date(), log = taskLog() } = {}) {
+  // Tests (and unusual setups) point Agouti at other directories: the task must use
+  // the same ones. A task can't set environment variables, so cmd sets them.
+  const extra = ["AGOUTI_CONFIG_DIR", "AGOUTI_DATA_DIR", "AGOUTI_RESTIC", "AGOUTI_MYSQLDUMP"].filter((k) => env[k]);
+  const run = [...command, "backup", "--scheduled"].map(winArg).join(" ");
+  const exec = {
+    command: env.ComSpec || "C:\\Windows\\System32\\cmd.exe",
+    args: `/d /s /c "${extra.map((k) => `set "${k}=${env[k]}" && `).join("")}${run} > ${winArg(log)} 2>&1"`,
+  };
+  const day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Agouti: back up apps (database + files). Written by Agouti (agouti schedule); changes are overwritten.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>${day}T${time}:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT12H</ExecutionTimeLimit>
+    <!-- Below normal: be gentle with the apps still serving traffic. -->
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>${xmlEscape(exec.command)}</Command>
+      <Arguments>${xmlEscape(exec.args)}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+`;
+}
+
+async function installTask(time, { p, env }) {
+  const file = join(p.dataDir, `schedule-${process.pid}.xml`);
+  // schtasks reads the file as UTF-16 (what the declaration says), with its BOM.
+  await writeAtomic(file, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(taskXml(time, { env, log: taskLog(p) }), "utf16le")]), 0o600);
+  try {
+    await schtasks(["/Create", "/TN", TASK, "/XML", file, "/F"], env);
+  } finally {
+    await rm(file, { force: true });
+  }
+}
+
+// What the task really runs and when, read back from Task Scheduler (PowerShell's
+// ScheduledTasks module: its output doesn't depend on the Windows language).
+async function taskStatus(env) {
+  const script = `$ErrorActionPreference='Stop'; $t = Get-ScheduledTask -TaskName '${TASK}'; $i = $t | Get-ScheduledTaskInfo; ` +
+    `[pscustomobject]@{ state = "$($t.State)"; exe = $t.Actions[0].Execute; args = $t.Actions[0].Arguments; ` +
+    `next = $(if ($i.NextRunTime) { $i.NextRunTime.ToString('yyyy-MM-dd HH:mm') } else { $null }); ` +
+    `lastResult = $i.LastTaskResult; lastRun = $(if ($i.LastRunTime -and $i.LastRunTime.Year -gt 2000) { $i.LastRunTime.ToString('yyyy-MM-dd HH:mm') } else { $null }) } | ConvertTo-Json -Compress`;
+  let r;
+  try {
+    r = await run(env.AGOUTI_POWERSHELL || "powershell", ["-NoProfile", "-NonInteractive", "-Command", script], { env });
+  } catch (err) {
+    return { problem: `Couldn't ask Task Scheduler: ${err.message}` };
+  }
+  if (r.code !== 0) return { problem: `The task "${TASK}" isn't in Task Scheduler on this server.` };
+  let t;
+  try {
+    t = JSON.parse(r.stdout);
+  } catch {
+    return { problem: `Couldn't read the task "${TASK}" from Task Scheduler.` };
+  }
+  for (const f of taskProgram(t.args)) {
+    if (f && !existsSync(f)) return { problem: `${f} no longer exists (Node or Agouti was moved or removed).` };
+  }
+  if (t.state === "Disabled") return { problem: `The task "${TASK}" is disabled in Task Scheduler.` };
+  return t.next ? { nextRun: t.next } : {};
+}
+
+// [node, agouti script] from the task's cmd arguments (see taskXml).
+export function taskProgram(args) {
+  const inner = String(args ?? "").replace(/^\/d \/s \/c "/, "").replace(/(?:set "[^"]*" && )*/, "");
+  return splitWin(inner).slice(0, 2);
+}
+
+// Splits a command line written with winArg().
+export function splitWin(line) {
+  return [...String(line).matchAll(/"((?:[^"\\]|\\.)*)"|(\S+)/g)].map((m) => (m[1] !== undefined ? m[1].replace(/\\(["\\])/g, "$1") : m[2]));
 }

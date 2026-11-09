@@ -38,7 +38,7 @@ export async function askStorage(ask = defaultAsk, { warnLocal = false } = {}) {
       Object.assign(a, await askS3Keys(ask, prev.accessKey));
     }
     if (a.provider === "sftp") a.sftpTarget = await text("sftpTarget", "Target (user@host:/path, uses root's SSH key)", { required: true });
-    if (a.provider === "local") a.path = await text("path", "Directory", { default: "/mnt/backups/agouti" });
+    if (a.provider === "local") a.path = await text("path", "Directory", { default: process.platform === "win32" ? "D:\\agouti-backups" : "/mnt/backups/agouti" });
 
     let result;
     try {

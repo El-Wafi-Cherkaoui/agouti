@@ -27,7 +27,11 @@ export function dumpFilter({ restricted = false, skipBinlogged = false, skipEven
   };
 
   // Returns the text to send on (possibly ""), for one complete line.
+  // mysqldump.exe on Windows ends lines with \r\n. A raw \r is never part of the
+  // data (mysqldump writes it as \r inside strings), so it's dropped here: otherwise
+  // "DELIMITER ;;" would never match, and events would reach a throwaway database.
   function line(l) {
+    if (l.endsWith("\r")) l = l.slice(0, -1);
     if (!inBlock) {
       if (/^CREATE TABLE `/.test(l)) stats.tables++;
       if (/^\/\*!50001 VIEW `/.test(l)) stats.views++;

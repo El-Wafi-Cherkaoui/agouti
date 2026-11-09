@@ -309,6 +309,9 @@ test("single files are restored next to the app layout; missing ones are reporte
   assert.equal(restored, join(p.dataDir, "restores", `shop-${point}`, "storage/app/public/avatars/1.jpg"));
   assert.ok(existsSync(restored));
   await assert.rejects(restoreFilesByPath("shop", point, [join(dir, "nope.txt")], { p }), /Not in this restore point/);
+  // A copy left in the folder earlier (a full copy, a previous single file) doesn't count.
+  await writeFile(join(p.dataDir, "restores", `shop-${point}`, "nope.txt"), "stale");
+  await assert.rejects(restoreFilesByPath("shop", point, [join(dir, "nope.txt")], { p }), /Not in this restore point/);
 });
 
 test("retention never lets a safety point push out a regular backup, and drops it after a week", async (t) => {

@@ -5,13 +5,14 @@
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { sep } from "node:path";
+import { escapePattern } from "./platform.js";
 
 const REPLACED = "�";
 
 // A restic --include pattern that matches exactly this path: pattern characters
 // escaped, and each replaced byte matched by "?" (one byte each).
-export function includePattern(path) {
-  return path.replace(/[\\*?[]/g, (c) => `\\${c}`).replaceAll(REPLACED, "?");
+export function includePattern(path, platform = process.platform) {
+  return escapePattern(path, platform).replaceAll(REPLACED, "?");
 }
 
 // The path as it really is on disk, for a path read from restic's listing. A plain

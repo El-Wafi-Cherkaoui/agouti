@@ -1,11 +1,12 @@
 // Restoring, interactively ("Restore" in the app, or `sudo agouti restore`), and the
 // output shared with `agouti restore <app> ...`.
-import { basename, dirname, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { mysqlClient } from "../mysql.js";
 import { ago } from "../app.js";
 import { requireConfig } from "../config.js";
 import { formatBytes } from "../detect.js";
 import { paths } from "../paths.js";
+import { isWindows } from "../platform.js";
 import { adminConnection, copyDatabaseName, discoverApps, findFiles, listPoints, newestBackup, restoreApp, restoreFilesByPath } from "../restore.js";
 import { bringBack, describeFound } from "./adopt.js";
 import { clearLaravelCache } from "../laravel.js";
@@ -68,7 +69,7 @@ export async function restoreFlow(ask, { p = paths(), app } = {}) {
         name: "As a copy, next to the live data (safe)",
         description: [
           parts.includes("database") ? `Database into ${copyDatabaseName(project.database.name, point.id)}` : null,
-          parts.includes("files") ? "files into /var/lib/agouti/restores" : null,
+          parts.includes("files") ? `files into ${join(p.dataDir, "restores")}` : null,
         ]
           .filter(Boolean)
           .join(", ")
@@ -142,8 +143,7 @@ export async function askAdmin(ask, project, p) {
     if (!(err instanceof UserError) || /isn't installed/.test(err.message)) throw err;
   }
   info(`
-This needs a MySQL admin that can create databases. Logging in as root through
-the local socket didn't work, so give one (and its server). The password is
+This needs a MySQL admin that can create databases. ${isWindows() ? "Logging in as root without a\npassword didn't work" : "Logging in as root through\nthe local socket didn't work"}, so give one (and its server). The password is
 only used right now and isn't saved.
 `);
   const db = project.database;
@@ -192,7 +192,8 @@ async function singleFile(ask, { app, project, point, bin, env, p }) {
     if (!choice) continue;
     const [restored] = await restoreFilesByPath(app, point.id, [choice], { p });
     info(`${green("✓")} Restored to ${bold(String(restored))}`);
-    info(dim(`The live file was not touched. To put it back:\n  sudo cp -a ${shellQuote(restored)} ${shellQuote(await livePathFor(choice, restored))}`));
+    const live = await livePathFor(choice, restored);
+    info(dim(`The live file was not touched. To put it back:\n  ${isWindows() ? `copy /Y ${shellQuote(restored)} ${shellQuote(live)}` : `sudo cp -a ${shellQuote(restored)} ${shellQuote(live)}`}`));
     return;
   }
 }
@@ -252,7 +253,7 @@ export async function runRestore(opts, { p = paths(), live = process.stdout.isTT
       ? `${green("✓")} Restored ${bold(`${result.app} @ ${result.at.replace("T", " ").slice(0, 16)}`)} ${dim("(UTC)")}`
       : `${red("✕")} The restore didn't complete.`,
   );
-  nextSteps(result);
+  nextSteps(result, opts.admin);
   return result;
 }
 
@@ -270,14 +271,23 @@ function partLine(part, r, mode) {
   return `${green("✓")} ${label} ${count} → ${bold(r.path)} · ${secs}`;
 }
 
-function nextSteps(r) {
+// The mysql command to look at a restored copy, with the login the restore used.
+export function mysqlLookCommand(database, admin = {}, { windows = isWindows(), client = basename(mysqlClient()).replace(/\.exe$/i, "") } = {}) {
+  const args = [client];
+  if (admin.user || windows) args.push(`-u ${admin.user ?? "root"}`, "-p");
+  if (admin.host && admin.host !== "localhost") args.push(`-h ${admin.host}`);
+  if (admin.port && admin.port !== 3306) args.push(`-P ${admin.port}`);
+  return [...args, database].join(" ");
+}
+
+function nextSteps(r, admin) {
   const lines = [];
   if (r.mode === "copy") {
     if (r.database?.ok) {
-      lines.push(`Look at the database: ${basename(mysqlClient())} ${r.database.database}`);
+      lines.push(`Look at the database: ${mysqlLookCommand(r.database.database, admin)}`);
       lines.push(`Drop it when you're done: DROP DATABASE \`${r.database.database}\`;`);
     }
-    if (r.files?.ok) lines.push(`Copy back what you need from ${r.files.path} (sudo cp -a keeps owners), then delete it.`);
+    if (r.files?.ok) lines.push(`Copy back what you need from ${r.files.path}${isWindows() ? "" : " (sudo cp -a keeps owners)"}, then delete it.`);
   } else if (r.mode === "replace") {
     if (r.safety?.ok) lines.push(`To undo: sudo agouti restore ${r.app} --point ${r.safety.point} --replace`);
     if (r.ok && r.framework !== "laravel") lines.push("Clear the app's caches if it has any, then bring it back up.");
@@ -291,6 +301,7 @@ function nextSteps(r) {
 async function livePathFor(listed, restored) {
   const live = await onDisk(listed);
   if (live) return live;
+  if (isWindows()) return join(dirname(listed), basename(String(restored))); // Windows names are always valid text
   const folder = (await onDisk(dirname(listed))) ?? dirname(listed);
   const name = Buffer.isBuffer(restored) ? restored.subarray(restored.lastIndexOf(0x2f) + 1) : Buffer.from(basename(restored));
   return Buffer.concat([Buffer.from(String(folder) === "/" ? "" : folder), Buffer.from("/"), name]);

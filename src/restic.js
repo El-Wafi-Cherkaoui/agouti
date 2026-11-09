@@ -2,18 +2,26 @@ import { spawn } from "./children.js";
 import { createHash } from "node:crypto";
 import { access, chmod, constants, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { inflateRawSync } from "node:zlib";
 import { fsError, loadCredentials } from "./config.js";
 import { paths } from "./paths.js";
 import { UserError, dim } from "./ui.js";
 
 // Pinned restic release. To upgrade: change the version and copy the hashes for the
-// linux_*.bz2 files from https://github.com/restic/restic/releases/download/v<version>/SHA256SUMS
+// linux_*.bz2 and windows_*.zip files from
+// https://github.com/restic/restic/releases/download/v<version>/SHA256SUMS
 export const RESTIC_VERSION = "0.19.1";
 const SHA256 = {
-  amd64: "f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c",
-  arm64: "a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465",
-  arm: "1edc5f67b0dd0d028586ab28c34b4da7522eabce933b3f6cd04f9ea184c2a502",
-  386: "c715a3de2fffb70a4c7864ef2d195db8bad96bc0284757cd5bd0f43362f2a191",
+  linux: {
+    amd64: "f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c",
+    arm64: "a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465",
+    arm: "1edc5f67b0dd0d028586ab28c34b4da7522eabce933b3f6cd04f9ea184c2a502",
+    386: "c715a3de2fffb70a4c7864ef2d195db8bad96bc0284757cd5bd0f43362f2a191",
+  },
+  win32: {
+    amd64: "da948ad707ed690426473aaba2046cd61f8f90f6f0e7dab6be0d5796531de67d",
+    386: "24147168e7988af20e4957d06ab7a9ba73792755150ce1ff270ad586c37fd160",
+  },
 };
 const ARCH = { x64: "amd64", arm64: "arm64", arm: "arm", ia32: "386" };
 
@@ -25,7 +33,8 @@ export const EXIT = { OK: 0, FATAL: 1, NO_REPO: 10, LOCKED: 11, WRONG_PASSWORD: 
 export async function ensureRestic({ p = paths(), log = () => {} } = {}) {
   if (process.env.AGOUTI_RESTIC) return process.env.AGOUTI_RESTIC;
 
-  const bin = join(p.binDir, `restic-${RESTIC_VERSION}`);
+  const windows = process.platform === "win32";
+  const bin = join(p.binDir, `restic-${RESTIC_VERSION}${windows ? ".exe" : ""}`);
   try {
     await access(bin, constants.X_OK);
     return bin;
@@ -33,13 +42,13 @@ export async function ensureRestic({ p = paths(), log = () => {} } = {}) {
     /* not installed yet */
   }
 
-  if (process.platform !== "linux") {
-    throw new UserError(`Agouti runs on Linux servers (this is ${process.platform}).`, "Set AGOUTI_RESTIC to a restic binary to try it anyway.");
+  if (!SHA256[process.platform]) {
+    throw new UserError(`Agouti runs on Linux and Windows servers (this is ${process.platform}).`, "Set AGOUTI_RESTIC to a restic binary to try it anyway.");
   }
   const arch = ARCH[process.arch];
-  if (!arch) throw new UserError(`No restic build for CPU architecture ${process.arch}.`, "Set AGOUTI_RESTIC to a restic binary.");
+  if (!arch || !SHA256[process.platform][arch]) throw new UserError(`No restic build for CPU architecture ${process.arch}.`, "Set AGOUTI_RESTIC to a restic binary.");
 
-  const name = `restic_${RESTIC_VERSION}_linux_${arch}.bz2`;
+  const name = windows ? `restic_${RESTIC_VERSION}_windows_${arch}.zip` : `restic_${RESTIC_VERSION}_linux_${arch}.bz2`;
   const url = `https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/${name}`;
   log(`Downloading restic ${RESTIC_VERSION} ${dim(`(${arch})`)} ...`);
 
@@ -56,11 +65,12 @@ export async function ensureRestic({ p = paths(), log = () => {} } = {}) {
   }
 
   const actual = createHash("sha256").update(compressed).digest("hex");
-  if (actual !== SHA256[arch]) {
-    throw new UserError(`Checksum mismatch for ${name}: expected ${SHA256[arch]}, got ${actual}. Nothing was installed.`);
+  const expected = SHA256[process.platform][arch];
+  if (actual !== expected) {
+    throw new UserError(`Checksum mismatch for ${name}: expected ${expected}, got ${actual}. Nothing was installed.`);
   }
 
-  const binary = await bunzip2(compressed);
+  const binary = windows ? unzipOne(compressed, /\.exe$/i) : await bunzip2(compressed);
   try {
     await mkdir(p.binDir, { recursive: true, mode: 0o755 });
     const tmp = `${bin}.tmp-${process.pid}`;
@@ -77,6 +87,35 @@ export async function ensureRestic({ p = paths(), log = () => {} } = {}) {
     throw new UserError(`The downloaded restic binary doesn't run on this server (${stdout.trim() || `exit ${code}`}).`);
   }
   return bin;
+}
+
+// The one file in a zip archive whose name matches, unpacked. restic's Windows
+// release is a zip holding just restic_<version>_windows_<arch>.exe; the archive's
+// checksum was verified before this runs. Reads the central directory (sizes in the
+// local headers can be left out), stored or deflated entries only.
+export function unzipOne(zip, nameRe) {
+  const eocd = zip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (eocd < 0) throw new UserError("The restic download isn't a valid zip file.");
+  const entries = zip.readUInt16LE(eocd + 10);
+  let at = zip.readUInt32LE(eocd + 16);
+  for (let i = 0; i < entries; i++) {
+    if (zip.readUInt32LE(at) !== 0x02014b50) break;
+    const method = zip.readUInt16LE(at + 10);
+    const size = zip.readUInt32LE(at + 20);
+    const nameLen = zip.readUInt16LE(at + 28);
+    const extraLen = zip.readUInt16LE(at + 30);
+    const commentLen = zip.readUInt16LE(at + 32);
+    const local = zip.readUInt32LE(at + 42);
+    const name = zip.toString("utf8", at + 46, at + 46 + nameLen);
+    at += 46 + nameLen + extraLen + commentLen;
+    if (!nameRe.test(name)) continue;
+    const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+    const data = zip.subarray(start, start + size);
+    if (method === 0) return Buffer.from(data);
+    if (method === 8) return inflateRawSync(data);
+    throw new UserError(`Can't unpack ${name} (zip method ${method}).`);
+  }
+  throw new UserError("The restic download doesn't contain restic.");
 }
 
 function bunzip2(buf) {

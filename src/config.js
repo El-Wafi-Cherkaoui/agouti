@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import YAML from "yaml";
 import { paths } from "./paths.js";
+import { isWindows } from "./platform.js";
 import { UserError } from "./ui.js";
 
 const HEADER = ` Agouti configuration. Written by \`agouti init\` and \`agouti add\`; safe to edit.
@@ -89,7 +90,7 @@ export async function writeAtomic(file, content, mode) {
 
 export function fsError(err, file) {
   if (err.code === "EACCES" || err.code === "EPERM") {
-    return new UserError(`Permission denied: ${file}`, "Run this command with sudo.");
+    return new UserError(`Permission denied: ${file}`, isWindows() ? "Run it in a terminal opened with \"Run as administrator\"." : "Run this command with sudo.");
   }
   return err;
 }

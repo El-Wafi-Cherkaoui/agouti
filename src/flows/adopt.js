@@ -132,7 +132,7 @@ async function askDir(ask, app, current) {
     await ask.input({
       message: `Where should ${app} go on this server?`,
       default: current,
-      validate: (v) => isAbsolute(v.trim()) || "Give an absolute path, e.g. /var/www/shop",
+      validate: (v) => isAbsolute(v.trim()) || `Give an absolute path, e.g. ${process.platform === "win32" ? "C:\\inetpub\\wwwroot\\shop" : "/var/www/shop"}`,
     })
   ).trim();
 }

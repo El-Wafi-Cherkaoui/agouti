@@ -5,7 +5,8 @@ import { requireConfig } from "../config.js";
 import { loadHealthcheck, ping, saveHealthcheck, validateHealthcheckUrl } from "../healthcheck.js";
 import { paths } from "../paths.js";
 import { DEFAULT_RETENTION } from "../retention.js";
-import { SERVICE, TIMER, agoutiCommand, installSchedule, parseTime, removeSchedule, scheduleStatus, serverTimezone } from "../schedule.js";
+import { SERVICE, TASK, TIMER, agoutiCommand, installSchedule, parseTime, removeSchedule, scheduleStatus, serverTimezone, taskLog } from "../schedule.js";
+import { isWindows } from "../platform.js";
 import { UserError, bold, dim, green, info, ok, red, warn, yellow } from "../ui.js";
 import { explainVerify, setupVerifyFlow } from "./verify.js";
 import { loadAlerts } from "../alerts.js";
@@ -22,7 +23,7 @@ export async function scheduleFlow(ask, { p = paths() } = {}) {
   const action = await ask.select({
     message: "What do you want to change?",
     choices: [
-      ...(status.problem ? [{ value: "repair", name: "Repair the timer", description: "Reinstall it with the Node and Agouti running now." }] : []),
+      ...(status.problem ? [{ value: "repair", name: isWindows() ? "Repair the scheduled task" : "Repair the timer", description: "Reinstall it with the Node and Agouti running now." }] : []),
       { value: "time", name: "Change the time" },
       { value: "healthcheck", name: url ? "Change the healthcheck" : "Add a healthcheck (recommended)" },
       ...(url ? [{ value: "no-healthcheck", name: "Remove the healthcheck" }] : []),
@@ -53,7 +54,7 @@ Every day, Agouti will:
   2. Delete restore points you no longer need. It keeps the last ${policy.daily} days,
      ${policy.weekly} weeks and ${policy.monthly} months (change this in agouti.yml).
   3. Ping your healthcheck, if you set one up (next step).
-It runs as a systemd timer (${TIMER}) on this server.
+${isWindows() ? `It runs as a Task Scheduler task ("${TASK}") on this server.` : `It runs as a systemd timer (${TIMER}) on this server.`}
 `);
   const time = await askTime(ask, "03:00");
   let url = await loadHealthcheck(p);
@@ -162,10 +163,10 @@ export function printInstalled(status, url) {
   if (url) ok(`Healthcheck: ${maskUrl(url)}. You'll be alerted if a backup fails or doesn't run.`);
   else warn(`No healthcheck. Add one later: ${bold("sudo agouti schedule --healthcheck <url>")}`);
   const [node] = agoutiCommand();
-  if (/\/\.nvm\/|^\/home\//.test(node)) {
-    info(dim(`The timer runs ${node}. If you remove that Node version, run \`sudo agouti schedule\` again to update it.`));
+  if (/\/\.nvm\/|^\/home\/|\\nvm\\|\\AppData\\/i.test(node)) {
+    info(dim(`The ${isWindows() ? "task" : "timer"} runs ${node}. If you remove that Node version, run \`sudo agouti schedule\` again to update it.`));
   }
-  info(dim(`Logs: journalctl -u ${SERVICE.replace(".service", "")}`));
+  info(dim(isWindows() ? `Output of the last run: type "${taskLog()}"` : `Logs: journalctl -u ${SERVICE.replace(".service", "")}`));
 }
 
 export function printStatus(status, url, config) {

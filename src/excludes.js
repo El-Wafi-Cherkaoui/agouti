@@ -10,9 +10,10 @@
 // An entry that can't be applied safely is ignored and reported: a typo in the config
 // must never make a backup hold less than it should.
 import { join, posix } from "node:path";
+import { escapePattern, isWindows } from "./platform.js";
 import { UserError } from "./ui.js";
 
-const escapeGlob = (s) => s.replace(/[\\*?[\]]/g, "\\$&");
+const escapeGlob = (s) => escapePattern(s);
 const trimSlashes = (s) => s.replace(/\/+$/, "");
 const everything = (s) => s.split("/").every((part) => /^\*+$/.test(part));
 const ALL = "it would leave out every file";
@@ -20,8 +21,9 @@ const ALL = "it would leave out every file";
 // Which backed-up folders an entry applies to, as { folder, rest }, or why it can't be used.
 function parseEntry(entry, folders) {
   if (typeof entry !== "string" || !entry.trim()) return { reason: "it isn't a file or folder name" };
-  const text = entry.trim();
-  if (text.startsWith("/")) return { reason: "it must be relative to the app" };
+  // Windows: people write storage\app\thumbs; agouti.yml keeps / on every system.
+  const text = isWindows() ? entry.trim().replace(/\\/g, "/") : entry.trim();
+  if (text.startsWith("/") || (isWindows() && /^[A-Za-z]:/.test(text))) return { reason: "it must be relative to the app" };
   const clean = trimSlashes(posix.normalize(text));
   if (clean === ".." || clean.startsWith("../")) return { reason: "it must stay inside the app" };
 

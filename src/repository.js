@@ -84,11 +84,12 @@ export async function storageReachable(config, { p = paths(), log, timeout = 60_
   const r = await run(bin, ["cat", "config", "--no-lock"], { env: await resticEnv(config, p), timeout });
   if (r.code === 0) return { ok: true };
   if (r.timedOut) return { ok: false, message: `The backup storage didn't answer within ${timeout / 1000} seconds.`, hint: "Check this server's network connection and the storage provider's status." };
-  if (r.code === EXIT.WRONG_PASSWORD) return { ok: false, message: "The recovery key on this server doesn't open the backup storage.", hint: "Check /etc/agouti/recovery-key." };
-  return { ok: false, message: `Can't reach the backup storage: ${resticReason(r.stderr)}.`, hint: "Check the network, and the storage keys in /etc/agouti/credentials.env." };
+  if (r.code === EXIT.WRONG_PASSWORD) return { ok: false, message: "The recovery key on this server doesn't open the backup storage.", hint: `Check ${p.recoveryKey}.` };
+  return { ok: false, message: `Can't reach the backup storage: ${resticReason(r.stderr)}.`, hint: `Check the network, and the storage keys in ${p.credentials}.` };
 }
 
-const isLocal = (repo) => !/^[a-z0-9]+:/i.test(repo);
+// "s3:...", "sftp:..." are remote; a Windows drive (D:\backups) is local.
+const isLocal = (repo) => !/^[a-z0-9]+:/i.test(repo) || /^[a-z]:[\\/]/i.test(repo);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms).unref());
 
 // restic's "Fatal: ..." line, without the JSON wrapper it has in --json mode.

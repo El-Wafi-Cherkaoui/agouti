@@ -1,5 +1,7 @@
 // Shows a backup as it runs. Used by `agouti backup` and "Back up now" in the app.
 // In a terminal, a live progress line; elsewhere (timers, logs) only final lines.
+import { uptime } from "node:os";
+import { join } from "node:path";
 import { backupApps } from "../backup.js";
 import { requireConfig } from "../config.js";
 import { formatBytes } from "../detect.js";
@@ -29,11 +31,20 @@ export async function runBackup(names = [], { p = paths(), live = process.stdout
   return results;
 }
 
+const BOOT_GRACE = 180; // seconds
+// Where a scheduled run's output is (see schedule.js).
+const logs = (p) => (process.platform === "win32" ? join(p.dataDir, "last-backup.log") : "journalctl -u agouti-backup");
+
 // What the daily timer runs (`agouti backup --scheduled`): back up, delete restore
 // points no longer needed, and tell the healthcheck and the alert channels how it
-// went. Output goes to the journal: `journalctl -u agouti-backup`. Returns true if
+// went. Output goes to the journal (`journalctl -u agouti-backup`), or on Windows to
+// last-backup.log in the data folder. Returns true if
 // everything worked.
 export async function scheduledBackup(names = [], { p = paths() } = {}) {
+  // Windows: a backup missed while the server was off runs as soon as it's back,
+  // and Task Scheduler can't wait for MySQL's service to start (systemd can, see
+  // schedule.js). Give the services a few minutes after a boot.
+  if (process.platform === "win32" && uptime() < BOOT_GRACE) await new Promise((r) => setTimeout(r, (BOOT_GRACE - uptime()) * 1000));
   const url = await loadHealthcheck(p).catch(() => null);
   if (url) await ping(url, "start");
   const report = []; // everything, for the healthcheck
@@ -169,7 +180,7 @@ async function alert(ok, problems, p) {
     message = {
       event: "failure",
       title: `✕ Agouti on ${hostname()}: ${n === 1 ? "a problem" : `${n} problems`} with the last backup`,
-      lines: [...(problems.length ? problems : ["Something failed: see journalctl -u agouti-backup"]), "  Details: journalctl -u agouti-backup"],
+      lines: [...(problems.length ? problems : [`Something failed: see ${logs(p)}`]), `  Details: ${logs(p)}`],
     };
   } else if (previous && !previous.ok) {
     message = { event: "recovered", title: `✓ Agouti on ${hostname()}: backups are working again`, lines: ["The last backup went fine."] };

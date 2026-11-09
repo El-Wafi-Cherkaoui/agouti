@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import { app } from "./app.js";
 import * as add from "./commands/add.js";
@@ -11,7 +12,9 @@ import * as restore from "./commands/restore.js";
 import * as rollback from "./commands/rollback.js";
 import * as schedule from "./commands/schedule.js";
 import * as verify from "./commands/verify.js";
-import { UserError, dim, red } from "./ui.js";
+import { paths } from "./paths.js";
+import { isAdmin, isWindows, makePrivate } from "./platform.js";
+import { UserError, dim, red, withCommand } from "./ui.js";
 
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -67,11 +70,11 @@ export async function main(argv) {
 
   if (!name) {
     // No command: open the app. Without a terminal (pipes, cron) there's nobody to ask.
-    if (!process.stdin.isTTY || !process.stdout.isTTY) return console.log(HELP);
+    if (!process.stdin.isTTY || !process.stdout.isTTY) return console.log(withCommand(HELP));
     requireRoot("agouti");
     return app();
   }
-  if (name === "-h" || name === "--help" || name === "help") return console.log(HELP);
+  if (name === "-h" || name === "--help" || name === "help") return console.log(withCommand(HELP));
   if (name === "-v" || name === "--version") return console.log(version);
 
   const command = COMMANDS[name];
@@ -97,8 +100,28 @@ export async function main(argv) {
 // Skipped when the directories are overridden, which is how tests run.
 function requireRoot(what) {
   const customDirs = process.env.AGOUTI_CONFIG_DIR && process.env.AGOUTI_DATA_DIR;
-  if (!customDirs && process.getuid?.() !== 0) {
-    throw new UserError(`\`${what}\` needs root: it manages /etc/agouti and /var/lib/agouti.`, `Run: sudo ${what}`);
+  const p = paths();
+  const admin = isAdmin();
+  if (!customDirs && !admin) {
+    if (isWindows())
+      throw new UserError(
+        `\`${what}\` needs administrator rights: it manages ${dirname(p.configDir)}.`,
+        `Open a terminal with "Run as administrator" (or log in over SSH as an administrator) and run ${what} again.`,
+      );
+    throw new UserError(`\`${what}\` needs root: it manages ${p.configDir} and ${p.dataDir}.`, `Run: sudo ${what}`);
+  }
+  // Windows: lock the folders down before any secret is written into them. Not
+  // without administrator rights (custom folders, tests): that would lock us out.
+  if (isWindows() && admin) {
+    for (const dir of [p.configDir, p.dataDir]) {
+      try {
+        mkdirSync(dir, { recursive: true });
+      } catch (err) {
+        throw new UserError(`Couldn't create ${dir}: ${err.message}`);
+      }
+      const error = makePrivate(dir);
+      if (error) throw new UserError(`Couldn't make ${dir} private to administrators: ${error}`, "Nothing was written there. Check that this terminal runs as administrator.");
+    }
   }
 }
 

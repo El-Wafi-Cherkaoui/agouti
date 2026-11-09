@@ -11,6 +11,7 @@ import { storageReachable } from "./repository.js";
 import { excludePatterns } from "./excludes.js";
 import { dumpCommand } from "./mysql.js";
 import { paths } from "./paths.js";
+import { fromSnapshotPath } from "./platform.js";
 import { EXIT, ensureRestic, resticEnv, run, runJson } from "./restic.js";
 import { acquireLock, baselineOf, loadState, recordBackup } from "./state.js";
 import { formatBytes } from "./detect.js";
@@ -227,7 +228,7 @@ async function changedDuring(bin, env, snapshot, since) {
     if (!line.includes('"type":"file"')) continue;
     try {
       const n = JSON.parse(line);
-      if (n.type === "file" && Date.parse(n.mtime) > since.getTime()) out.push(n.path);
+      if (n.type === "file" && Date.parse(n.mtime) > since.getTime()) out.push(fromSnapshotPath(n.path));
     } catch {
       // not a node line
     }

@@ -4,6 +4,7 @@ import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { fsError, requireConfig, saveConfig } from "./config.js";
 import { inspectDatabase, writeOptionFile } from "./mysql.js";
 import { paths } from "./paths.js";
+import { isWindows } from "./platform.js";
 import { UserError } from "./ui.js";
 
 export function optionFilePath(name, p = paths()) {
@@ -19,7 +20,7 @@ export function validateName(name, config) {
 // The app directory must exist, and not already be backed up under another name.
 export async function validateAppDir(dir, config) {
   if (!isAbsolute(dir)) dir = resolve(dir);
-  dir = normalize(dir).replace(/\/+$/, "") || "/";
+  dir = isWindows() ? normalize(dir).replace(/(?<!^[A-Za-z]:)\\+$/, "") : normalize(dir).replace(/\/+$/, "") || "/";
   let s;
   try {
     s = await stat(dir);
@@ -27,7 +28,9 @@ export async function validateAppDir(dir, config) {
     throw new UserError(`${dir} doesn't exist.`);
   }
   if (!s.isDirectory()) throw new UserError(`${dir} isn't a directory.`);
-  const taken = Object.entries(config.projects ?? {}).find(([, proj]) => proj.path === dir);
+  // Windows paths aren't case-sensitive: C:\Sites\Shop is c:\sites\shop.
+  const same = (a, b) => (isWindows() ? a?.toLowerCase() === b.toLowerCase() : a === b);
+  const taken = Object.entries(config.projects ?? {}).find(([, proj]) => same(proj.path, dir));
   if (taken) throw new UserError(`${dir} is already added as "${taken[0]}".`);
   return dir;
 }
@@ -43,7 +46,9 @@ export async function validateFolders(dir, folders) {
     } catch {
       throw new UserError(`${join(dir, rel)} isn't an existing folder.`);
     }
-    if (!out.includes(rel)) out.push(rel);
+    // agouti.yml keeps / on every system (storage/app/public, not storage\app\public).
+    const stored = isWindows() ? rel.replace(/\\/g, "/") : rel;
+    if (!out.includes(stored)) out.push(stored);
   }
   return out;
 }

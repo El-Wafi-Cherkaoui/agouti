@@ -11,11 +11,12 @@ import { dumpFilter, loadDump, readDump } from "./dump.js";
 import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { chmod, chown, mkdir, readdir, rename, rm, statfs } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, parse, relative } from "node:path";
 import { APP_FILE, backupApps } from "./backup.js";
 import { requireConfig, writeAtomic } from "./config.js";
-import { id, mysqlClient, optionFileContent, query, str } from "./mysql.js";
+import { id, installClientHint, mysqlClient, optionFileContent, query, str } from "./mysql.js";
 import { paths } from "./paths.js";
+import { fromSnapshotPath, isWindows, relativePosix, toSnapshotPath } from "./platform.js";
 import { ensureRestic, resticEnv, run, runJson } from "./restic.js";
 import { includePattern, onDisk } from "./names.js";
 import { acquireLock, flaggedPoints, lockFile, recordReplace } from "./state.js";
@@ -35,12 +36,17 @@ export async function listPoints(app, { bin, env, flagged = {} }) {
     const pt = points.get(point) ?? { id: point, at: s.time, database: null, files: null, safety: s.tags.includes("kind=safety"), flagged: flagged[point] ?? null };
     if (s.time < pt.at) pt.at = s.time;
     const sum = s.summary ?? {};
-    if (tag("part") === "database") pt.database = { snapshot: s.id, path: s.paths[0], bytes: sum.total_bytes_processed };
+    if (tag("part") === "database") pt.database = { snapshot: s.id, path: stdinPath(s.paths[0]), bytes: sum.total_bytes_processed };
     if (tag("part") === "files") pt.files = { snapshot: s.id, paths: s.paths, excludes: s.excludes ?? [], files: sum.total_files_processed, bytes: sum.total_bytes_processed };
     points.set(point, pt);
   }
   return [...points.values()].sort((a, b) => b.id.localeCompare(a.id));
 }
+
+// A database dump is saved from standard input as <db>.sql. restic lists it as
+// /shop.sql (Linux) or C:\shop.sql (Windows), but inside the snapshot it's /shop.sql
+// on both, and that's what `restic dump` needs.
+export const stdinPath = (listed) => `/${String(listed).split(/[\\/]/).pop()}`;
 
 // What "latest" means: the newest real backup that has every part asked for. Not a
 // point saved before a restore (it may hold the very damage being undone), and not
@@ -103,24 +109,26 @@ function guessDescription(app) {
   const latest = (part) => app.snapshots.filter((s) => s.tags.includes(`part=${part}`)).sort((a, b) => b.time.localeCompare(a.time))[0];
   const db = latest("database");
   const folders = latest("files")?.paths ?? [];
+  const sep = isWindows() ? "\\" : "/";
   // The app's folder: above storage/ (Laravel), else the folders' common parent.
-  const common = folders.length ? folders.reduce((a, b) => commonDir(a, b)) : "";
-  const path = common.includes("/storage") ? common.slice(0, common.indexOf("/storage")) : common;
+  const common = folders.length ? folders.reduce((a, b) => commonDir(a, b, sep)) : "";
+  const at = common.indexOf(`${sep}storage`);
+  const path = at >= 0 ? common.slice(0, at) : common;
   return {
     app: app.name,
     path,
-    database: { engine: "mysql", name: db ? db.paths[0].replace(/^\//, "").replace(/\.sql$/, "") : app.name },
-    files: folders.map((f) => relative(path, f)),
+    database: { engine: "mysql", name: db ? stdinPath(db.paths[0]).slice(1).replace(/\.sql$/, "") : app.name },
+    files: folders.map((f) => relativePosix(path, f)),
     guessed: true,
   };
 }
 
-function commonDir(a, b) {
-  const x = a.split("/");
-  const y = b.split("/");
+function commonDir(a, b, sep = "/") {
+  const x = a.split(sep);
+  const y = b.split(sep);
   let i = 0;
   while (i < x.length && x[i] === y[i]) i++;
-  return x.slice(0, i).join("/") || "/";
+  return x.slice(0, i).join(sep) || sep;
 }
 
 const cleanRestic = (stderr) =>
@@ -178,7 +186,7 @@ export async function adminConnection(project, { user, password, host, port, p =
   const test = await query(file, "SELECT CURRENT_USER()");
   if (!test.ok) {
     await rm(file, { force: true });
-    if (test.missing) throw new UserError("The mysql client isn't installed.", "Install it (e.g. `apt install mysql-client`) and try again.");
+    if (test.missing) throw new UserError("The mysql client isn't installed.", installClientHint());
     throw new UserError(
       user ? `Can't connect as ${user}: ${test.error}` : `Can't connect as MySQL root on this server: ${test.error}`,
       "Restoring needs a MySQL user that can create databases. Give one with --db-admin-user (password in AGOUTI_DB_ADMIN_PASSWORD).",
@@ -242,7 +250,7 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
     if (mode === "copy") {
       const folder = copyFolder(p, app, point.id);
       if (parts.includes("files") && (await readdir(folder).catch(() => [])).length) {
-        throw new UserError(`${folder} already exists (restored earlier?).`, `Delete it first if you don't need it: rm -r ${folder}`);
+        throw new UserError(`${folder} already exists (restored earlier?).`, `Delete it first if you don't need it: ${isWindows() ? `rmdir /S /Q "${folder}"` : `rm -r ${folder}`}`);
       }
       const db = copyDatabaseName(project.database.name, point.id);
       if (parts.includes("database") && (await query(admin.file, `SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ${str(db)}`)).rows?.length) {
@@ -458,7 +466,7 @@ async function restoreFiles(point, project, { bin, env, mode, origin, target, on
     // never to the whole app (which would delete the code), and skips what this
     // backup left out on purpose (it isn't in the snapshot, but must not be deleted).
     const rel = relative(origin, folder);
-    const dest = mode === "copy" ? join(target, rel.startsWith("..") ? folder.replace(/^\/+/, "") : rel) : destination(folder, origin, project.path);
+    const dest = mode === "copy" ? join(target, rel.startsWith("..") ? outsidePath(folder) : rel) : destination(folder, origin, project.path);
     try {
       // New server: the folders mkdir creates would belong to root, and the app
       // couldn't write into them. Afterwards they get the owner the backup recorded.
@@ -466,7 +474,7 @@ async function restoreFiles(point, project, { bin, env, mode, origin, target, on
       await mkdir(dest, { recursive: true });
       // --sparse: runs of zeros stay holes, so a sparse file (a VM image, a database
       // file) takes the space it did, not its full size. Contents are identical.
-      const args = ["restore", `${point.files.snapshot}:${folder}`, "--target", dest, "--sparse", ...(mode === "replace" ? ["--delete", ...restoreExcludes(point.files.excludes, folder).flatMap((x) => ["--exclude", x])] : [])];
+      const args = ["restore", `${point.files.snapshot}:${toSnapshotPath(folder)}`, "--target", dest, "--sparse", ...(mode === "replace" ? ["--delete", ...restoreExcludes(point.files.excludes, folder).flatMap((x) => ["--exclude", x])] : [])];
       const r = await runJson(bin, args, {
         env,
         onMessage: (m) => {
@@ -507,6 +515,10 @@ async function restoreFiles(point, project, { bin, env, mode, origin, target, on
   };
 }
 
+// Where a folder that was outside the app goes inside a copy: its full path, as
+// folders (restores/shop-<point>/srv/old/uploads, or .../C/old/uploads on Windows).
+const outsidePath = (folder) => toSnapshotPath(folder).replace(/^\/+/, "");
+
 // The folders from `dir` up to (not including) `root` that don't exist yet, deepest first.
 async function missingDirs(dir, root) {
   const out = [];
@@ -517,6 +529,8 @@ async function missingDirs(dir, root) {
 // Gives each folder the owner and permissions it had in the backup. Folders the
 // backup doesn't know (above what was backed up) are left alone.
 async function applyRecordedOwners(dirs, { bin, env, snapshot, toBackup }) {
+  // Windows: restic keeps no owners there; new folders inherit their parent's permissions.
+  if (isWindows()) return;
   for (const dir of dirs) {
     const path = toBackup(dir);
     const r = await run(bin, ["ls", "--json", snapshot, path], { env });
@@ -545,7 +559,7 @@ export function unixMode(goMode) {
 // restic leaves a file whose data couldn't be read at full size with wrong contents.
 // Renamed, it can't pass for a good copy. Returns the damaged items, relative to dest.
 async function markDamaged(dest, errors) {
-  const items = [...new Set(errors.filter((m) => m.during === "restore" && m.item).map((m) => m.item.replace(/^\/+/, "")))];
+  const items = [...new Set(errors.filter((m) => m.during === "restore" && m.item).map((m) => m.item.replace(/^[\\/]+/, "")))];
   for (const item of items) await rename(join(dest, item), join(dest, `${item}.damaged`)).catch(() => {}); // restic may not have written it at all
   return items;
 }
@@ -582,7 +596,8 @@ export async function findFiles(point, text, { bin, env, limit = 30 }) {
     if (!line) continue;
     const node = JSON.parse(line);
     if (node.struct_type !== "node" || node.type !== "file") continue;
-    if (node.path.toLowerCase().includes(needle)) matches.push({ path: node.path, size: node.size, mtime: node.mtime });
+    // Shown and restored as a path on this system (C:\inetpub\shop\... on Windows).
+    if (node.path.toLowerCase().includes(needle)) matches.push({ path: fromSnapshotPath(node.path), size: node.size, mtime: node.mtime });
     if (matches.length >= limit) break;
   }
   return matches;
@@ -602,9 +617,14 @@ export async function restoreFilesByPath(app, pointId, filePaths, { p = paths(),
   const target = copyFolder(p, app, point.id);
   // Files outside the app (it was moved since) keep their full path.
   const inside = filePaths.every((f) => !relative(project.path, f).startsWith(".."));
-  const base = inside ? project.path : "/";
+  // Outside: from the top of the file's drive (Windows) or of the system. On
+  // Windows the snapshot's own top folder (/C) can't be restored as such.
+  const base = inside ? project.path : parse(filePaths[0]).root;
   const include = filePaths.flatMap((f) => ["--include", includePattern("/" + relative(base, f))]);
-  const r = await runJson(bin, ["restore", `${point.files.snapshot}:${base}`, "--target", target, "--sparse", ...include], { env });
+  // An earlier copy of the same file (a full copy of this point, a previous single
+  // file) must not pass for this restore: if restic didn't write it, it isn't there.
+  for (const f of filePaths) await rm(join(target, relative(base, f)), { recursive: true, force: true });
+  const r = await runJson(bin, ["restore", `${point.files.snapshot}:${toSnapshotPath(base)}`, "--target", target, "--sparse", ...include], { env });
   const bad = await markDamaged(target, r.errors);
   if (bad.length) {
     throw new UserError(

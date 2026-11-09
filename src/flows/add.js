@@ -70,7 +70,7 @@ async function askAppDir(ask, config, dir) {
     if (choice) return validateAppDir(choice, config);
   }
   for (;;) {
-    const input = await ask.input({ message: "App directory", default: "/var/www/", required: true });
+    const input = await ask.input({ message: "App directory", default: process.platform === "win32" ? "C:\\inetpub\\wwwroot\\" : "/var/www/", required: true });
     try {
       return await validateAppDir(input.trim(), config);
     } catch (err) {
@@ -83,6 +83,8 @@ async function askAppDir(ask, config, dir) {
 // ── Database ─────────────────────────────────────────────────────────────────
 
 function explainEnvAccess(envFile, name, p) {
+  const win = process.platform === "win32";
+  const admins = win ? "Administrators" : "root";
   info(`
 ${yellow("⚠")} ${bold("Agouti needs this app's database connection details.")}
 
@@ -96,11 +98,11 @@ ${bold("If you allow it, Agouti will:")}
     password); every other line is discarded immediately, never stored,
     logged or sent anywhere
   • save the database password in ${join(p.projectsDir, `${name}.cnf`)},
-    readable by root only, and pass it to MySQL through that file, never on
-    the command line
+    readable by ${admins} only, and pass it to MySQL through that file, never
+    on the command line
 
 ${bold("How serious is this?")} ${yellow("Moderate.")}
-  Agouti runs as root, and root can already read .env, so this doesn't open
+  Agouti runs as ${win ? "an administrator, and administrators" : "root, and root"} can already read .env, so this doesn't open
   a new way in. But the app's database user can usually change and delete data,
   and a copy of its password would now live in a second place on this server.
 
@@ -156,7 +158,7 @@ async function backupUserSetup(ask, app) {
   const password = generatePassword();
   const username = backupUserName(app);
   info(`
-Run this as a MySQL admin (on most servers: ${bold(`sudo ${basename(mysqlClient())}`)}):
+Run this as a MySQL admin (on most servers: ${bold(process.platform === "win32" ? `${basename(mysqlClient()).replace(/\.exe$/i, "")} -u root -p` : `sudo ${basename(mysqlClient())}`)}):
 
 ${backupUserSql({ database, username, password, flavor: await clientFlavor() })}
 

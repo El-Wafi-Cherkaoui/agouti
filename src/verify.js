@@ -19,6 +19,7 @@ import { dumpFilter, loadDump } from "./dump.js";
 import { generatePassword, id, optionFileContent, query, str } from "./mysql.js";
 import { includePattern, onDisk } from "./names.js";
 import { paths } from "./paths.js";
+import { fromSnapshotPath, toSnapshotPath } from "./platform.js";
 import { adminConnection, listPoints } from "./restore.js";
 import { EXIT, clearStaleLocks, ensureRestic, lockedMessage, resticEnv, run } from "./restic.js";
 import { acquireLock, loadState, recordDataCheck, recordVerify } from "./state.js";
@@ -274,13 +275,26 @@ async function verifyFiles(app, point, { bin, env, p }) {
   await rm(tmp, { recursive: true, force: true });
   await mkdir(tmp, { recursive: true, mode: 0o700 });
   try {
-    const r = await run(bin, ["restore", point.files.snapshot, "--target", tmp, "--sparse", ...sample.flatMap((n) => ["--include", includePattern(n.path)])], { env });
-    if (r.code !== 0) return { ok: false, error: `Restoring a sample of files failed: ${lastLine(r.stderr)}` };
+    // One restore per backed-up folder (snapshot:folder), each into its own place.
+    // Restoring from the top of the snapshot would also restore the folders above
+    // the app, and on Windows that fails on system folders (C:\Users and the like).
+    const folders = point.files.paths.map((f) => toSnapshotPath(f));
+    const where = new Map(); // node -> its restored path
+    for (const [i, folder] of folders.entries()) {
+      const inside = sample.filter((n) => n.path.startsWith(`${folder}/`) && !where.has(n));
+      if (!inside.length) continue;
+      const dest = join(tmp, String(i));
+      const rel = (n) => n.path.slice(folder.length);
+      const r = await run(bin, ["restore", `${point.files.snapshot}:${folder}`, "--target", dest, "--sparse", ...inside.flatMap((n) => ["--include", includePattern(rel(n))])], { env });
+      if (r.code !== 0) return { ok: false, error: `Restoring a sample of files failed: ${lastLine(r.stderr)}` };
+      for (const n of inside) where.set(n, join(dest, rel(n)));
+    }
     let compared = 0;
     const bad = [];
     for (const n of sample) {
       // As it really is on disk: listed names lose bytes that aren't valid UTF-8.
-      const restored = (await onDisk(join(tmp, n.path))) ?? join(tmp, n.path);
+      const restoredAt = where.get(n) ?? join(tmp, "missing");
+      const restored = (await onDisk(restoredAt)) ?? restoredAt;
       const s = await stat(restored).catch(() => null);
       if (!s || s.size !== n.size) {
         bad.push(`${n.path}: ${s ? `${s.size} bytes, expected ${n.size}` : "missing after restore"}`);
@@ -288,7 +302,7 @@ async function verifyFiles(app, point, { bin, env, p }) {
       }
       // Unchanged since the backup (same size and modification time)? Then the
       // restored copy must be byte-for-byte the live one.
-      const livePath = (await onDisk(n.path)) ?? n.path;
+      const livePath = (await onDisk(fromSnapshotPath(n.path))) ?? fromSnapshotPath(n.path);
       const live = await stat(livePath).catch(() => null);
       if (live && live.size === n.size && Math.abs(live.mtimeMs - preciseMs(n.mtime)) < 1) {
         compared++;

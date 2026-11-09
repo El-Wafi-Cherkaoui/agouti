@@ -105,13 +105,16 @@ export function describeRepository(repository) {
 // A local repository on the same disk as the system doesn't survive losing the
 // server (disk failure, deleted VPS, an attacker with root). Returns a warning to
 // show, or null when the directory is on a separate disk or mount.
+// The system's disk: / on Linux, the Windows drive (C:\) on Windows.
+const systemRoot = () => (process.platform === "win32" ? `${process.env.SystemDrive || "C:"}\\` : "/");
+
 export function localDiskWarning(repository) {
   if (/^(s3|sftp|rest|b2|azure|gs|swift|rclone):/.test(repository)) return null;
   let dir = resolve(repository);
   // The directory may not exist yet: look at the closest parent that does.
   for (;;) {
     try {
-      if (statSync(dir).dev !== statSync("/").dev) return null;
+      if (statSync(dir).dev !== statSync(systemRoot()).dev) return null;
       break;
     } catch {
       if (dir === dirname(dir)) return null;
@@ -122,7 +125,7 @@ export function localDiskWarning(repository) {
     `${repository} is on the same disk as this server's system.`,
     "Backups there protect against mistakes (a deleted file, a bad migration), but not against",
     "losing the server: a failed disk, a deleted VPS, or an attacker with root takes them too.",
-    "If you meant to use a separate disk, make sure it's mounted first.",
+    process.platform === "win32" ? "If you meant to use a separate disk, make sure it's plugged in and has its drive letter." : "If you meant to use a separate disk, make sure it's mounted first.",
     "For real protection, store backups off this server (R2, S3, B2 or SFTP).",
   ].join("\n");
 }

@@ -64,8 +64,11 @@ export async function dirStats(dir) {
   return { bytes, files };
 }
 
+// Where web apps usually live. Windows: IIS, XAMPP and Laragon folders.
+const APP_ROOTS = process.platform === "win32" ? "C:\\inetpub\\wwwroot;C:\\xampp\\htdocs;C:\\laragon\\www" : "/var/www:/srv";
+
 // Apps under the usual web roots, to offer as choices. AGOUTI_APP_ROOTS overrides (tests).
-export async function findApps(roots = (process.env.AGOUTI_APP_ROOTS ?? "/var/www:/srv").split(":")) {
+export async function findApps(roots = (process.env.AGOUTI_APP_ROOTS ?? APP_ROOTS).split(process.platform === "win32" ? ";" : ":")) {
   const apps = [];
   for (const root of roots) {
     for (const name of await subdirs(root)) {

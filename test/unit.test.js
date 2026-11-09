@@ -9,6 +9,9 @@ import { generateRecoveryKey, normalizeRecoveryKey } from "../src/recovery-key.j
 import { buildRepository, describeRepository, localDiskWarning } from "../src/storage.js";
 import { UserError } from "../src/ui.js";
 
+// Unix file modes, /proc, bash quoting and sudo: Windows has its own tests (platform.test.js).
+const LINUX_ONLY = { skip: process.platform === "win32" && "Linux only" };
+
 test("recovery keys have the documented shape and don't repeat", () => {
   const a = generateRecoveryKey();
   assert.match(a, /^agouti-rk-([0-9A-HJKMNP-TV-Z]{4}-){7}[0-9A-HJKMNP-TV-Z]{4}$/);
@@ -48,7 +51,7 @@ test("repositories are described briefly", () => {
   assert.equal(describeRepository("/mnt/b"), "local (/mnt/b)");
 });
 
-test("config and credentials round-trip, secrets are private", async () => {
+test("config and credentials round-trip, secrets are private", LINUX_ONLY, async () => {
   const dir = await mkdtemp(join(tmpdir(), "agouti-test-"));
   const p = paths({ AGOUTI_CONFIG_DIR: dir, AGOUTI_DATA_DIR: dir });
 
@@ -63,14 +66,14 @@ test("config and credentials round-trip, secrets are private", async () => {
   assert.equal((await stat(p.credentials)).mode & 0o777, 0o600);
 });
 
-test("local storage on the system disk is flagged, other disks and remote storage aren't", () => {
+test("local storage on the system disk is flagged, other disks and remote storage aren't", LINUX_ONLY, () => {
   assert.match(localDiskWarning("/agouti-test-does-not-exist/repo"), /same disk/);
   assert.equal(localDiskWarning("/proc/agouti"), null); // a different filesystem
   assert.equal(localDiskWarning("s3:https://s3.eu-west-1.amazonaws.com/b"), null);
   assert.equal(localDiskWarning("sftp:u@h:/srv/b"), null);
 });
 
-test("shellQuote: printed commands read back exactly, whatever the file name", async () => {
+test("shellQuote: printed commands read back exactly, whatever the file name", LINUX_ONLY, async () => {
   const { shellQuote } = await import("../src/ui.js");
   const { execFileSync } = await import("node:child_process");
   const names = ["/srv/shop/storage/app/a.pdf", "it's.pdf", "x'; rm -rf / #.pdf", "$(id) `id` $HOME.pdf", "new\nline.pdf", "esc\x1b[31mred.pdf", "back\\slash.pdf", "été ünïcode.pdf"];
@@ -81,7 +84,7 @@ test("shellQuote: printed commands read back exactly, whatever the file name", a
   }
 });
 
-test("suggested commands work under sudo: the full command when sudo can't find agouti (nvm, a git checkout)", async () => {
+test("suggested commands work under sudo: the full command when sudo can't find agouti (nvm, a git checkout)", LINUX_ONLY, async () => {
   const { setAgoutiCommand, withCommand, UserError } = await import("../src/ui.js");
   const { mkdtemp, writeFile, symlink, mkdir } = await import("node:fs/promises");
   const root = await mkdtemp(join(tmpdir(), "agouti-cmd-"));
