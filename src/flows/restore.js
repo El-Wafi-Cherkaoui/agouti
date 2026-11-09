@@ -7,7 +7,7 @@ import { requireConfig } from "../config.js";
 import { formatBytes } from "../detect.js";
 import { paths } from "../paths.js";
 import { isWindows } from "../platform.js";
-import { adminConnection, copyDatabaseName, discoverApps, findFiles, listPoints, newestBackup, restoreApp, restoreFilesByPath } from "../restore.js";
+import { adminConnection, copyDatabaseName, discoverApps, findFiles, listPoints, newestBackup, putFileBack, restoreApp, restoreFilesByPath } from "../restore.js";
 import { bringBack, describeFound } from "./adopt.js";
 import { clearLaravelCache } from "../laravel.js";
 import { flaggedPoints } from "../state.js";
@@ -134,7 +134,8 @@ Put the app in maintenance mode first if it's live (Laravel: php artisan down).
 
 // Finds a MySQL user that can create databases: root through the local socket,
 // or one the user gives. Returns { user, password } for restoreApp.
-export async function askAdmin(ask, project, p) {
+// need: what the admin must be able to do; cancelled: the message when they give up.
+export async function askAdmin(ask, project, p, { need = "that can create databases", cancelled = "Restore cancelled: no MySQL user to restore with." } = {}) {
   try {
     const conn = await adminConnection(project, { p });
     await conn.cleanup();
@@ -143,7 +144,7 @@ export async function askAdmin(ask, project, p) {
     if (!(err instanceof UserError) || /isn't installed/.test(err.message)) throw err;
   }
   info(`
-This needs a MySQL admin that can create databases. ${isWindows() ? "Logging in as root without a\npassword didn't work" : "Logging in as root through\nthe local socket didn't work"}, so give one (and its server). The password is
+This needs a MySQL admin ${need}. ${isWindows() ? "Logging in as root without a\npassword didn't work" : "Logging in as root through\nthe local socket didn't work"}, so give one (and its server). The password is
 only used right now and isn't saved.
 `);
   const db = project.database;
@@ -161,7 +162,7 @@ only used right now and isn't saved.
     } catch (err) {
       if (!(err instanceof UserError)) throw err;
       info(`${red("✕")} ${err.message}`);
-      if (!(await ask.confirm({ message: "Try again?", default: true }))) throw new UserError("Restore cancelled: no MySQL user to restore with.");
+      if (!(await ask.confirm({ message: "Try again?", default: true }))) throw new UserError(cancelled);
     }
   }
 }
@@ -193,10 +194,38 @@ async function singleFile(ask, { app, project, point, bin, env, p }) {
     const [restored] = await restoreFilesByPath(app, point.id, [choice], { p });
     info(`${green("✓")} Restored to ${bold(String(restored))}`);
     const live = await livePathFor(choice, restored);
-    info(dim(`The live file was not touched. To put it back:\n  ${isWindows() ? `copy /Y ${shellQuote(restored)} ${shellQuote(live)}` : `sudo cp -a ${shellQuote(restored)} ${shellQuote(live)}`}`));
+    const exists = Boolean(await onDisk(choice));
+    const rel = relative(project.path, choice);
+    const keepAt = join(p.dataDir, "restores", `${app}-replaced-${stamp()}`, rel.startsWith("..") ? basename(choice) : rel);
+    const put = await ask.select({
+      message: exists ? "Put it back in the app, replacing the live file?" : "Put it back in the app? (it's no longer there)",
+      choices: [
+        {
+          value: "put",
+          name: exists ? "Yes, replace the live file" : "Yes, put it back",
+          description: exists ? `The live file is kept first, in ${dirname(keepAt)}.` : `Back to ${String(live)}.`,
+        },
+        { value: "keep", name: "No, just keep the copy" },
+      ],
+    });
+    if (put === "keep") {
+      info(dim(`The live file was not touched. To put it back yourself:\n  ${isWindows() ? `copy /Y ${shellQuote(restored)} ${shellQuote(live)}` : `sudo cp -a ${shellQuote(restored)} ${shellQuote(live)}`}`));
+      return;
+    }
+    try {
+      const { kept } = await putFileBack({ restored, live, keepAt });
+      info(`${green("✓")} Put back: ${bold(String(live))} ${dim(`(as it was on ${point.at.replace("T", " ").slice(0, 16)} UTC)`)}`);
+      if (kept) info(dim(`The file it replaced is kept in ${kept}. Delete it when you no longer need it.`));
+    } catch (err) {
+      const busy = ["EBUSY", "EPERM", "EACCES"].includes(err.code);
+      warn(`Couldn't put it back: ${err.message}${busy ? " (is the app using the file right now?)" : ""}. The live file wasn't changed; the restored copy is at ${String(restored)}.`);
+    }
     return;
   }
 }
+
+// "20261109-1015" (UTC), for folders that must not collide.
+const stamp = () => new Date().toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
 
 // Runs a restore and prints it. Returns the result.
 export async function runRestore(opts, { p = paths(), live = process.stdout.isTTY } = {}) {

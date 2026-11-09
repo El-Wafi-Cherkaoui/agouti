@@ -1,7 +1,7 @@
 // "Add an app", driven with scripted answers. A stand-in mysql client accepts any
 // password except "wrong", and records its arguments.
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { before, test } from "node:test";
@@ -98,6 +98,7 @@ test("read-only backup user: SQL shown, failed connection fixed in place", async
     ["input", /Name/, "shop"],
     ["select", /How should Agouti connect/, "backup-user"],
     ["input", /Database name/, "shop_prod"],
+    ["select", /Create it how/, "sql"],
     ["select", /Done/, "yes"],
     ["select", /What now/, (o) => (assert.ok(o.choices.some((c) => c.value === "save")), "edit")],
     ["input", /Host/, (o) => (assert.equal(o.default, "localhost"), "localhost")],
@@ -134,6 +135,67 @@ test("read-only backup user: SQL shown, failed connection fixed in place", async
   assert.equal(project.database.user, "agouti_shop");
   assert.equal(project.database.source, "manual");
   assert.match(await readFile(project.database.credentials, "utf8"), new RegExp(`password="${generated}"`), "kept the generated password");
+});
+
+test("read-only backup user created by Agouti: an admin login is asked once and kept nowhere", async () => {
+  const { p, dir } = await setup();
+  // A server where root has a password (Windows, most non-Debian servers), and no database "missing".
+  const orig = process.env.AGOUTI_MYSQL;
+  const server = join(await mkdtemp(join(tmpdir(), "agouti-server-")), "mysql");
+  await writeFile(
+    server,
+    `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "mysql  Ver 8.0.45"; exit 0; fi
+file="\${1#--defaults-extra-file=}"
+if grep -q 'user="root"' "$file" && grep -q 'password=""' "$file"; then echo "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: NO)" >&2; exit 1; fi
+case "$*" in *"SCHEMA_NAME = 'missing'"*) exit 0;; esac
+exec "${orig}" "$@"
+`,
+  );
+  await chmod(server, 0o755);
+  process.env.AGOUTI_MYSQL = server;
+  const admin = [
+    ["input", /MySQL server/, (o) => (assert.equal(o.default, "localhost"), "localhost:3307")],
+    ["input", /MySQL admin user/, "root"],
+    ["password", /Password of root/, "r00t-secret"],
+  ];
+  const ask = scripted([
+    ["input", /Name/, "shop"],
+    ["select", /How should Agouti connect/, "backup-user"],
+    ["input", /Database name/, "missing"],
+    ["select", /Create it how/, "agouti"],
+    ...admin,
+    ["select", /How should Agouti connect/, "backup-user"],
+    ["input", /Database name/, "shop_prod"],
+    ["select", /Create it how/, "agouti"],
+    ...admin,
+    ["checkbox", /Which folders/, ["storage/app/public"]],
+    ["input", /Other folders/, ""],
+    ["confirm", /Add shop/, true],
+    ["confirm", /first backup/, false],
+  ]);
+  let out;
+  try {
+    out = await captured(() => addFlow(ask, { p, dir }));
+  } finally {
+    process.env.AGOUTI_MYSQL = orig;
+  }
+  assert.deepEqual(ask.remaining, []);
+  assert.match(out, /This needs a MySQL admin that can create users/);
+  assert.match(out, /There's no database missing on this MySQL server/);
+  assert.match(out, /Created agouti_shop: it can read shop_prod/);
+  const args = await readFile(argsLog, "utf8");
+  assert.match(args, /CREATE USER IF NOT EXISTS 'agouti_shop'@'localhost'/);
+  assert.match(args, /GRANT SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT ON `shop_prod`\.\* TO 'agouti_shop'@'localhost'/);
+  assert.ok(!args.includes("r00t-secret"), "the admin password is never on the command line");
+
+  const project = (await loadConfig(p)).projects.shop;
+  assert.equal(project.database.user, "agouti_shop");
+  assert.equal(project.database.port, 3307, "the backup user connects to the server the admin gave");
+  const cnf = await readFile(project.database.credentials, "utf8");
+  assert.match(cnf, /user="agouti_shop"/);
+  for (const f of [p.config, project.database.credentials]) assert.ok(!(await readFile(f, "utf8")).includes("r00t-secret"), `${f} holds the admin password`);
+  assert.deepEqual((await readdir(p.dataDir).catch(() => [])).filter((f) => f.startsWith("restore-admin")), [], "no admin login file left behind");
 });
 
 test("cancelling leaves nothing behind, and .env is never read", async () => {

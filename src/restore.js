@@ -10,7 +10,7 @@ import { shield, stopAll } from "./children.js";
 import { dumpFilter, loadDump, readDump } from "./dump.js";
 import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
-import { chmod, chown, mkdir, readdir, rename, rm, statfs } from "node:fs/promises";
+import { chmod, chown, copyFile, lstat, mkdir, readdir, rename, rm, statfs, utimes } from "node:fs/promises";
 import { dirname, join, parse, relative } from "node:path";
 import { APP_FILE, backupApps } from "./backup.js";
 import { requireConfig, writeAtomic } from "./config.js";
@@ -638,4 +638,45 @@ export async function restoreFilesByPath(app, pointId, filePaths, { p = paths(),
   if (!restored.every(Boolean))
     throw new UserError(`Not in this restore point: ${filePaths.join(", ")}`, `Point ${point.id}. Pick another with --point.`);
   return restored;
+}
+
+// Puts a restored file back into the app: the copy at `restored` replaces the live
+// file at `live` (either may be a Buffer path, see names.js). The live file, if
+// there is one, is first copied to `keepAt`, so this can be undone. The file gets
+// the permissions, owner and times it had in the backup (like cp -a). Folders that
+// no longer exist are created, owned like the restored copy's folder.
+// Returns { kept: path | null }.
+export async function putFileBack({ restored, live, keepAt }) {
+  const meta = await lstat(restored);
+  if (!meta.isFile()) throw new UserError(`${restored} isn't a file.`);
+  let kept = null;
+  const current = await lstat(live).catch(() => null);
+  if (current) {
+    if (!current.isFile()) throw new UserError(`${live} isn't a file, so it wasn't replaced.`);
+    await mkdir(dirname(keepAt), { recursive: true });
+    await copyFile(live, keepAt);
+    await utimes(keepAt, current.atime, current.mtime).catch(() => {});
+    kept = keepAt;
+  } else if (typeof live === "string") {
+    const parent = await lstat(dirname(restored));
+    const created = await mkdir(dirname(live), { recursive: true });
+    if (created && !isWindows()) {
+      for (let d = dirname(live); d.length >= created.length; d = dirname(d)) await chown(d, parent.uid, parent.gid).catch(() => {}); // needs root
+    }
+  }
+  // Written next to the live file, then renamed over it: the app never sees half a file.
+  const tmp = typeof live === "string" ? `${live}.agouti-${process.pid}` : Buffer.concat([live, Buffer.from(`.agouti-${process.pid}`)]);
+  try {
+    await copyFile(restored, tmp);
+    if (!isWindows()) {
+      await chmod(tmp, meta.mode & 0o7777);
+      await chown(tmp, meta.uid, meta.gid).catch(() => {}); // needs root; tests run without
+    }
+    await utimes(tmp, meta.atime, meta.mtime);
+    await rename(tmp, live);
+  } catch (err) {
+    await rm(tmp, { force: true });
+    throw err;
+  }
+  return { kept };
 }

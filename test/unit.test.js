@@ -122,3 +122,40 @@ test("times in UTC get the server's local time next to them, from the system's r
   }
   assert.equal(localNote("2026-11-08T23:30:00Z", { timeZone: "Asia/Tokyo" }), " (2026-11-09 08:30 local)", "the fallback without `date`");
 });
+
+test("a restored file put back: the live one is kept first, the backup's date and mode come along", async () => {
+  const { putFileBack } = await import("../src/restore.js");
+  const { mkdtemp, mkdir, writeFile, readFile, stat, utimes, chmod, readdir } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = await mkdtemp(join(tmpdir(), "agouti-putback-"));
+  const restored = join(root, "restores", "shop-1", "storage", "app", "invoice.pdf");
+  await mkdir(join(root, "restores", "shop-1", "storage", "app"), { recursive: true });
+  await writeFile(restored, "from the backup");
+  const then = new Date("2026-11-01T10:00:00Z");
+  await utimes(restored, then, then);
+  if (process.platform !== "win32") await chmod(restored, 0o640);
+
+  // Replacing a live file.
+  const live = join(root, "app", "storage", "app", "invoice.pdf");
+  await mkdir(join(root, "app", "storage", "app"), { recursive: true });
+  await writeFile(live, "damaged");
+  const keepAt = join(root, "restores", "shop-replaced", "storage", "app", "invoice.pdf");
+  const r = await putFileBack({ restored, live, keepAt });
+  assert.equal(r.kept, keepAt);
+  assert.equal(await readFile(live, "utf8"), "from the backup");
+  assert.equal(await readFile(keepAt, "utf8"), "damaged");
+  assert.equal((await stat(live)).mtime.toISOString(), then.toISOString());
+  if (process.platform !== "win32") assert.equal((await stat(live)).mode & 0o777, 0o640);
+  assert.deepEqual((await readdir(join(root, "app", "storage", "app"))).sort(), ["invoice.pdf"], "no temporary file left");
+
+  // A file whose folder was deleted too.
+  const gone = join(root, "app", "storage", "app", "deleted", "deeper", "invoice.pdf");
+  assert.deepEqual(await putFileBack({ restored, live: gone, keepAt: join(root, "unused") }), { kept: null });
+  assert.equal(await readFile(gone, "utf8"), "from the backup");
+
+  // A folder where the file was: refused, nothing changed.
+  const dir = join(root, "app", "isdir");
+  await mkdir(dir);
+  await assert.rejects(putFileBack({ restored, live: dir, keepAt: join(root, "k2") }), /isn't a file/);
+});

@@ -6,7 +6,9 @@ import { runBackup } from "./backup.js";
 import { detectApp, dirStats, fileCandidates, findApps, formatBytes, suggestName } from "../detect.js";
 import { readDatabaseSettings } from "../envfile.js";
 import { basename } from "node:path";
-import { backupUserName, backupUserSql, clientFlavor, generatePassword, mysqlClient, routinesWarning } from "../mysql.js";
+import { backupUserName, backupUserSql, clientFlavor, createBackupUser, generatePassword, installClientHint, mysqlClient, query, routinesWarning, str } from "../mysql.js";
+import { adminConnection } from "../restore.js";
+import { askAdmin } from "./restore.js";
 import { paths } from "../paths.js";
 import { discardDatabase, prepareDatabase, saveProject, validateAppDir, validateFolders, validateName } from "../projects.js";
 import { UserError, bold, dim, info, ok, red, warn, yellow } from "../ui.js";
@@ -109,7 +111,7 @@ ${bold("How serious is this?")} ${yellow("Moderate.")}
 ${bold("What we suggest:")} a dedicated ${bold("read-only backup user")}.
   Backups are exactly the same, but if that password ever leaks, it can't be
   used to change or delete your data, and changing the app's own password
-  later won't break your backups. Agouti gives you the SQL to create it.
+  later won't break your backups. Agouti can create it for you.
 `);
 }
 
@@ -121,7 +123,7 @@ async function askDatabase(ask, { app, name, p }) {
     const method = await ask.select({
       message: "How should Agouti connect to the database?",
       choices: [
-        { value: "backup-user", name: "Create a read-only backup user (recommended)", description: "Agouti shows the SQL; you run it as a MySQL admin." },
+        { value: "backup-user", name: "Create a read-only backup user (recommended)", description: "Agouti creates it with a MySQL admin login, or shows you the SQL." },
         ...(app.envFile
           ? [{ value: "env", name: "Read the details from .env", description: "Uses the app's own database user. Only DB_* lines are kept." }]
           : []),
@@ -133,7 +135,7 @@ async function askDatabase(ask, { app, name, p }) {
 
     let settings;
     try {
-      if (method === "backup-user") settings = await backupUserSetup(ask, name);
+      if (method === "backup-user") settings = await backupUserSetup(ask, name, p);
       if (method === "env") {
         settings = await readDatabaseSettings(app.envFile);
         info(dim(`Read from .env: ${settings.database} @ ${settings.socket ?? `${settings.host}:${settings.port}`} as ${settings.username} (password hidden)`));
@@ -153,8 +155,22 @@ async function askDatabase(ask, { app, name, p }) {
   }
 }
 
-async function backupUserSetup(ask, app) {
+async function backupUserSetup(ask, app, p) {
   const database = (await ask.input({ message: "Database name (the app's DB_DATABASE)", required: true })).trim();
+  const how = await ask.select({
+    message: "Create it how?",
+    choices: [
+      {
+        value: "agouti",
+        name: "Agouti creates it now (recommended)",
+        description: "Log in once as a MySQL admin (e.g. root). That password is only used for this and isn't saved.",
+      },
+      { value: "sql", name: "Show me the SQL, I'll run it myself" },
+      { value: "back", name: "Go back" },
+    ],
+  });
+  if (how === "back") return null;
+  if (how === "agouti") return createUserNow(ask, { app, database, p });
   const password = generatePassword();
   const username = backupUserName(app);
   info(`
@@ -174,6 +190,28 @@ ${dim("The password was generated just now; Agouti will store it, you don't need
   });
   if (done === "back") return null;
   return { host: "localhost", port: 3306, database, username, password };
+}
+
+// Creates the backup user through an admin login (the same one restores use: root
+// through the socket on Linux, otherwise asked for). Returns its connection settings.
+async function createUserNow(ask, { app, database, p }) {
+  const server = { host: "localhost", port: 3306 };
+  const admin = await askAdmin(ask, { database: server }, p, { need: "that can create users", cancelled: "No backup user was created." });
+  const conn = await adminConnection({ database: server }, { ...admin, p });
+  let user;
+  try {
+    const found = await query(conn.file, `SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ${str(database)}`);
+    if (!found.ok) throw new UserError(`Couldn't check the database: ${found.error}`);
+    if (!found.rows.length) throw new UserError(`There's no database ${database} on this MySQL server.`, "Check the name (the app's DB_DATABASE) and the server.");
+    // On this server: a user that can only log in from it. Elsewhere: from anywhere.
+    const local = !admin.host || ["localhost", "127.0.0.1", "::1"].includes(admin.host);
+    user = await createBackupUser(conn.file, { app, database, host: local ? "localhost" : "%" });
+  } finally {
+    await conn.cleanup();
+  }
+  ok(`Created ${bold(user.username)}: it can read ${database}, and can't change anything.`);
+  if (!user.routines) warn(routinesWarning(user.username));
+  return { host: admin.host ?? server.host, port: admin.port ?? server.port, database, username: user.username, password: user.password };
 }
 
 async function askConnection(ask, prev) {
@@ -198,7 +236,7 @@ async function connectLoop(ask, name, settings, p) {
       return settings;
     }
     if (check.clientMissing) {
-      warn(`${check.message} Install it (e.g. \`apt install mysql-client\`) before the first backup.`);
+      warn(`${check.message} ${installClientHint()}`);
       return settings;
     }
     info(`${red("✕")} Couldn't connect: ${check.message}`);
