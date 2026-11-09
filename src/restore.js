@@ -17,7 +17,7 @@ import { requireConfig, writeAtomic } from "./config.js";
 import { id, installClientHint, mysqlClient, optionFileContent, query, str } from "./mysql.js";
 import { paths } from "./paths.js";
 import { fromSnapshotPath, isWindows, relativePosix, toSnapshotPath } from "./platform.js";
-import { ensureRestic, resticEnv, run, runJson } from "./restic.js";
+import { ensureRestic, parseSnapshots, resticEnv, run, runJson } from "./restic.js";
 import { includePattern, onDisk } from "./names.js";
 import { acquireLock, flaggedPoints, lockFile, recordReplace } from "./state.js";
 import { UserError } from "./ui.js";
@@ -29,7 +29,7 @@ export async function listPoints(app, { bin, env, flagged = {} }) {
   const r = await run(bin, ["snapshots", "--json", "--tag", `agouti,app=${app}`], { env });
   if (r.code !== 0) throw new UserError(`Couldn't list restore points: ${cleanRestic(r.stderr)}`);
   const points = new Map();
-  for (const s of JSON.parse(r.stdout || "[]") ?? []) {
+  for (const s of parseSnapshots(r.stdout)) {
     const tag = (name) => s.tags?.find((t) => t.startsWith(`${name}=`))?.slice(name.length + 1);
     const point = tag("point");
     if (!point) continue;
@@ -64,7 +64,7 @@ export async function discoverApps({ bin, env }) {
   const r = await run(bin, ["snapshots", "--json", "--tag", "agouti"], { env });
   if (r.code !== 0) throw new UserError(`Couldn't read the backups: ${cleanRestic(r.stderr)}`);
   const apps = new Map();
-  for (const s of JSON.parse(r.stdout || "[]") ?? []) {
+  for (const s of parseSnapshots(r.stdout)) {
     const tag = (name) => s.tags?.find((t) => t.startsWith(`${name}=`))?.slice(name.length + 1);
     const name = tag("app");
     if (!name || s.tags.includes("kind=safety")) continue;

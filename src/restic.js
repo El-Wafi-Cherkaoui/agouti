@@ -164,6 +164,13 @@ export function run(bin, args, { env = process.env, stdin, timeout } = {}) {
   });
 }
 
+// `restic snapshots --json`, with each time in UTC ("2026-11-09T11:27:14.223Z").
+// restic writes the server's local time with its offset (12:27:14+01:00), and Agouti
+// shows, compares and sorts these times as UTC text.
+export function parseSnapshots(stdout) {
+  return (JSON.parse(stdout || "[]") ?? []).map((s) => ({ ...s, time: new Date(s.time).toISOString() }));
+}
+
 // Is there a repository at the configured location, and does our key open it?
 export async function probeRepository(bin, env) {
   const { code, stderr } = await run(bin, ["cat", "config", "--no-lock"], { env });

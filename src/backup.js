@@ -12,7 +12,7 @@ import { excludePatterns } from "./excludes.js";
 import { dumpCommand } from "./mysql.js";
 import { paths } from "./paths.js";
 import { fromSnapshotPath } from "./platform.js";
-import { EXIT, ensureRestic, resticEnv, run, runJson } from "./restic.js";
+import { EXIT, ensureRestic, parseSnapshots, resticEnv, run, runJson } from "./restic.js";
 import { acquireLock, baselineOf, loadState, recordBackup } from "./state.js";
 import { formatBytes } from "./detect.js";
 import { UserError } from "./ui.js";
@@ -245,7 +245,7 @@ async function changedDuring(bin, env, snapshot, since) {
 async function latestFiles(bin, env, app) {
   const r = await run(bin, ["snapshots", "--json", "--tag", `agouti,app=${app},part=files`], { env });
   if (r.code !== 0) return null;
-  const snaps = JSON.parse(r.stdout || "[]") ?? [];
+  const snaps = parseSnapshots(r.stdout);
   const last = snaps.sort((a, b) => a.time.localeCompare(b.time)).at(-1);
   return last ? { id: last.id, files: last.summary?.total_files_processed ?? null } : null;
 }

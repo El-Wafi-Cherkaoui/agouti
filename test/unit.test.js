@@ -159,3 +159,11 @@ test("a restored file put back: the live one is kept first, the backup's date an
   await mkdir(dir);
   await assert.rejects(putFileBack({ restored, live: dir, keepAt: join(root, "k2") }), /isn't a file/);
 });
+
+test("snapshot times are read as UTC: restic writes the server's local time with its offset", async () => {
+  const { parseSnapshots } = await import("../src/restic.js");
+  const [s] = parseSnapshots(JSON.stringify([{ id: "a", time: "2026-11-09T12:27:14.2231133+01:00", tags: ["point=20261109T112714Z"] }]));
+  assert.equal(s.time, "2026-11-09T11:27:14.223Z");
+  assert.equal(s.time.replace("T", " ").slice(0, 16), "2026-11-09 11:27", "what Agouti shows as (UTC)");
+  assert.deepEqual(parseSnapshots(""), []);
+});
