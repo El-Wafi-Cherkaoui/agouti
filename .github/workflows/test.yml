@@ -29,3 +29,29 @@ jobs:
           path: test/.cache
           key: restic-${{ hashFiles('src/restic.js') }}
       - run: npm test
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      # The other test files use Linux stand-ins (shell scripts for mysql, systemctl).
+      - run: node --test test/platform.test.js test/unit.test.js
+      # The real thing, as administrator: restic's Windows zip downloaded, checked and
+      # unpacked, the folders locked to Administrators, a repository created.
+      - name: agouti init on Windows
+        shell: pwsh
+        env:
+          AGOUTI_CONFIG_DIR: ${{ runner.temp }}\agouti\config
+          AGOUTI_DATA_DIR: ${{ runner.temp }}\agouti\data
+        run: |
+          node bin/agouti.js init --repo "$env:RUNNER_TEMP\agouti-repo"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Test-Path "$env:AGOUTI_DATA_DIR\bin\restic-0.19.1.exe")) { throw "restic.exe missing" }
+          $acl = (Get-Acl $env:AGOUTI_CONFIG_DIR).Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
+          $acl | Sort-Object -Unique
+          if ($acl | Where-Object { $_ -notin @("S-1-5-32-544", "S-1-5-18") }) { throw "the config folder is readable by others" }
