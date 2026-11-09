@@ -240,11 +240,18 @@ agouti backup shop
 
 ## What it detects
 
-Today Agouti detects **Laravel**: it backs up `storage/app/public` and `storage/app/private`, skips `storage/framework`, `storage/logs` and `bootstrap/cache`, and can read the database details from `.env`, but only after you allow it.
+Today Agouti detects:
 
-Any other app works too if you enter its database details and folders yourself.
+- **Laravel**: it backs up `storage/app/public` and `storage/app/private`, and skips `storage/framework`, `storage/logs` and `bootstrap/cache`.
+- **Node.js and Next.js** (from `package.json`): it offers the usual upload folders it finds (`public/uploads`, `uploads`, `storage`, `data`...).
 
-*Planned:* detection for WordPress, Django, Rails, Node.js and Docker volumes.
+It looks in the usual web folders (`/var/www`, `/srv`; on Windows `C:\inetpub\wwwroot`, XAMPP and Laragon), and one folder deeper for projects that keep their backend in a subfolder. With your permission it reads the database details from `.env`: Laravel's `DB_*` lines, or `DATABASE_URL` and `DB_NAME`/`DB_USER` as Node apps write them. Every other line is discarded.
+
+Any other app works too if you enter its database details and folders yourself. A folder outside the app (uploads kept in `/srv/shop-uploads` or `D:\Data\uploads`) is added by its full path.
+
+**Apps that run as a service.** On Windows, Agouti finds the service that runs the app (NSSM, WinSW, node-windows) and offers to stop it while a restore replaces live data, then start it again, so the app doesn't write into half-restored data. It also checks that the service's account can still write into the restored folders. On Linux, give the systemd unit with `agouti add --service`.
+
+*Planned:* detection for WordPress, Django, Rails and Docker volumes.
 
 ## Configuration
 
@@ -264,6 +271,8 @@ projects:
     files:
       - storage/app/public
       - storage/app/private
+      - /srv/shop-uploads                      # a folder outside the app, by its full path
+    service: shop.service                      # optional: stopped while a restore replaces live data
     exclude:                                   # left out of the backups
       - storage/app/public/thumbs              # a path inside one of the folders above
       - "*.tmp"                                # or a name, anywhere inside them
@@ -355,7 +364,7 @@ Agouti backs up **the apps running on your server**: their databases and their f
 
 ## Roadmap
 
-- **v0.1:** detect (Laravel) → back up (database + files) → schedule → retention → healthcheck → restore (full, database, files, single file) → restore on a new server → weekly restore tests
+- **v0.1:** detect (Laravel, Node.js, Next.js) → back up (database + files) → schedule → retention → healthcheck → restore (full, database, files, single file) → restore on a new server → weekly restore tests
 - **v0.2:** the reference check (files your database points to) · status TUI
 - **Later:** point-in-time recovery from binlogs · `mydumper` for large databases · dumps from a replica · Postgres · backing up S3-hosted uploads · single binary and Docker image
 
