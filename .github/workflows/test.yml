@@ -40,7 +40,7 @@ jobs:
           cache: npm
       - run: npm ci
       # The other test files use Linux stand-ins (shell scripts for mysql, systemctl).
-      - run: node --test test/platform.test.js test/unit.test.js
+      - run: node --test test/platform.test.js test/unit.test.js test/services.test.js
       # The real thing, as administrator: restic's Windows zip downloaded, checked and
       # unpacked, the folders locked to Administrators, a repository created.
       - name: agouti init on Windows

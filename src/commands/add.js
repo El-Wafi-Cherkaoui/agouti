@@ -7,6 +7,7 @@ import { addFlow } from "../flows/add.js";
 import { paths } from "../paths.js";
 import { defaultAsk } from "../prompts.js";
 import { discardDatabase, prepareDatabase, saveProject, validateAppDir, validateFolders, validateName } from "../projects.js";
+import { validateServiceName } from "../services.js";
 import { UserError, bold, info, ok, warn } from "../ui.js";
 
 export const usage = `Usage: agouti add [<app-directory>] [options]
@@ -26,14 +27,17 @@ Database (non-interactive), one of:
 
 Options:
   --name <name>        Name for the app (default: the directory name)
-  --files <a,b>        Folders to back up, relative to the app
-                       (default: the detected upload folders)
+  --files <a,b>        Folders to back up, relative to the app, or full paths
+                       for folders outside it (default: the detected upload folders)
+  --service <name>     The service that runs the app (Windows service, systemd
+                       unit): stopped while a restore replaces live data
   --exclude <a,b>      Leave these out of the backups: names anywhere in those
                        folders ("thumbs", "*.tmp"), or paths relative to the app
   --no-check           Save even if the database connection fails`;
 
 export const options = {
   name: { type: "string" },
+  service: { type: "string" },
   "read-env": { type: "boolean" },
   "db-name": { type: "string" },
   "db-host": { type: "string" },
@@ -86,6 +90,8 @@ export async function add({ values, positionals }) {
     ? await validateFolders(appDir, values.files.split(","))
     : (await fileCandidates(appDir, app.framework)).filter((c) => c.include).map((c) => c.path);
   const exclude = validateExcludes((values.exclude ?? "").split(","), files);
+  const service = values.service?.trim() || undefined;
+  if (service && validateServiceName(service) !== true) throw new UserError(`--service: "${service}" isn't a service name.`);
 
   try {
     const { check } = await prepareDatabase(name, db, p);
@@ -96,7 +102,7 @@ export async function add({ values, positionals }) {
     else if (values["no-check"]) warn(`Couldn't connect: ${check.message} (saved anyway, --no-check)`);
     else throw new UserError(`Couldn't connect to the database: ${check.message}`, "Fix the details, or pass --no-check to save anyway.");
 
-    await saveProject({ name, dir: appDir, framework: app.framework, db, source: values["read-env"] ? "env" : "manual", files, exclude }, p);
+    await saveProject({ name, dir: appDir, framework: app.framework, db, source: values["read-env"] ? "env" : "manual", files, exclude, service }, p);
   } catch (err) {
     await discardDatabase(name, p);
     throw err;
@@ -104,4 +110,5 @@ export async function add({ values, positionals }) {
   ok(`Added ${bold(name)} (${app.label})`);
   info(`  Files: ${files.length ? files.join(", ") : "none (database only)"}`);
   if (exclude.length) info(`  Left out: ${exclude.join(", ")}`);
+  if (service) info(`  Service: ${service} (stopped while a restore replaces live data)`);
 }

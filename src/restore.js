@@ -20,6 +20,7 @@ import { fromSnapshotPath, isWindows, relativePosix, toSnapshotPath } from "./pl
 import { ensureRestic, parseSnapshots, resticEnv, run, runJson } from "./restic.js";
 import { includePattern, onDisk } from "./names.js";
 import { acquireLock, flaggedPoints, lockFile, recordReplace } from "./state.js";
+import { checkWriteAccess, serviceStatus, startService, startServiceSync, stopService } from "./services.js";
 import { UserError } from "./ui.js";
 
 // Restore points of one app, newest first:
@@ -218,7 +219,7 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
 
   const release = await acquireLock(p);
   let admin;
-  const state = { safety: null, touchingLive: false, checking: null };
+  const state = { safety: null, touchingLive: false, checking: null, stoppedService: null };
   const unguard = guardInterrupts(state, {
     app,
     onEvent,
@@ -227,6 +228,8 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
         spawnSync(mysqlClient(), [`--defaults-extra-file=${admin.file}`, "-e", `DROP DATABASE IF EXISTS ${id(state.checking)}`], { stdio: "ignore", timeout: 10000 });
       }
       if (admin) rmSync(admin.file, { force: true });
+      // The app was stopped for the restore: don't leave it down.
+      if (state.stoppedService) startServiceSync(state.stoppedService);
       rmSync(lockFile(p), { force: true });
     },
   });
@@ -289,54 +292,94 @@ export async function restoreApp(opts, { p = paths(), onEvent = () => {}, log } 
       }
       onEvent({ type: "check-done", app });
     }
-    if (mode === "replace") {
-      onEvent({ type: "safety-start", app });
-      const [safety] = await backupApps([app], { p, lock: false, log, tags: ["kind=safety"] });
-      result.safety = safety;
-      state.safety = safety.ok ? safety.point : null;
-      onEvent({ type: "safety-done", app, result: safety });
-      const broken = parts.filter((part) => !safety[part].ok);
-      if (broken.length) {
-        throw new UserError(
-          `Couldn't save the current ${broken.join(" and ")} first, so nothing was replaced.`,
-          `${safety[broken[0]].error}. You can still restore as a copy.`,
-        );
-      }
-      // The safety point re-uses data already in the repository, damage included. It's
-      // the only way back once the live database is gone, so make sure it can be read.
-      if (parts.includes("database")) {
-        const saved = (await listPoints(app, { bin, env })).find((pt) => pt.id === safety.point);
-        await readDump(saved.database, { bin, env }).catch((err) => {
+    // The app's service is stopped while its data is replaced, so it doesn't write
+    // into a half-restored database or folder, nor between the safety point and the
+    // replace (that change would be lost to undo). It's started again whatever happens.
+    let service = null;
+    if (mode === "replace" && project.service) {
+      const status = await serviceStatus(project.service);
+      service = { name: project.service, account: status.account, exists: status.exists, wasRunning: Boolean(status.running) };
+      result.service = service;
+      if (status.running) {
+        onEvent({ type: "service-stop", name: project.service });
+        try {
+          await stopService(project.service);
+        } catch (err) {
+          throw new UserError(`${err.message}, so nothing was replaced.`, "Stop the app yourself and try again, or restore as a copy.");
+        }
+        state.stoppedService = project.service;
+      } else onEvent({ type: "service-not-running", name: project.service, exists: status.exists });
+    }
+
+    try {
+      if (mode === "replace") {
+        onEvent({ type: "safety-start", app });
+        const [safety] = await backupApps([app], { p, lock: false, log, tags: ["kind=safety"] });
+        result.safety = safety;
+        state.safety = safety.ok ? safety.point : null;
+        onEvent({ type: "safety-done", app, result: safety });
+        const broken = parts.filter((part) => !safety[part].ok);
+        if (broken.length) {
           throw new UserError(
-            `The current database was saved, but the saved copy can't be read back, so nothing was replaced. Undo wouldn't work. ${err.message}`,
-            "Your live data is as it was. The backup storage may be damaged: check it, and keep a separate copy of the database before trying again.",
+            `Couldn't save the current ${broken.join(" and ")} first, so nothing was replaced.`,
+            `${safety[broken[0]].error}. You can still restore as a copy.`,
           );
-        });
+        }
+        // The safety point re-uses data already in the repository, damage included. It's
+        // the only way back once the live database is gone, so make sure it can be read.
+        if (parts.includes("database")) {
+          const saved = (await listPoints(app, { bin, env })).find((pt) => pt.id === safety.point);
+          await readDump(saved.database, { bin, env }).catch((err) => {
+            throw new UserError(
+              `The current database was saved, but the saved copy can't be read back, so nothing was replaced. Undo wouldn't work. ${err.message}`,
+              "Your live data is as it was. The backup storage may be damaged: check it, and keep a separate copy of the database before trying again.",
+            );
+          });
+        }
+      }
+
+      state.touchingLive = mode !== "copy";
+      if (mode === "replace") {
+        await recordReplace(app, { at: new Date().toISOString(), point: point.id, pointAt: point.at, safety: state.safety, parts }, p);
+      }
+      for (const part of parts) {
+        // Replacing: after a failed part, stop. Undo with the safety point rather than pile on changes.
+        if (mode === "replace" && !result.ok) break;
+        onEvent({ type: "part-start", part });
+        const started = Date.now();
+        let r;
+        try {
+          r =
+            part === "database"
+              ? await restoreDatabase(point, project, { bin, env, admin, mode, onEvent })
+              : await restoreFiles(point, project, { bin, env, mode, origin, target: copyFolder(p, app, point.id), onEvent });
+        } catch (err) {
+          r = { ok: false, error: err.message, hint: err.hint };
+        }
+        r.seconds = Math.round((Date.now() - started) / 100) / 10;
+        result[part] = r;
+        if (!r.ok) result.ok = false;
+        onEvent({ type: "part-done", part, result: r });
+      }
+    } finally {
+      if (state.stoppedService) {
+        onEvent({ type: "service-start", name: state.stoppedService });
+        try {
+          await startService(state.stoppedService);
+          service.started = true;
+        } catch (err) {
+          service.started = false;
+          service.error = err.message;
+        }
+        state.stoppedService = null;
+        onEvent({ type: "service-started", service });
       }
     }
 
-    state.touchingLive = mode !== "copy";
-    if (mode === "replace") {
-      await recordReplace(app, { at: new Date().toISOString(), point: point.id, pointAt: point.at, safety: state.safety, parts }, p);
-    }
-    for (const part of parts) {
-      // Replacing: after a failed part, stop. Undo with the safety point rather than pile on changes.
-      if (mode === "replace" && !result.ok) break;
-      onEvent({ type: "part-start", part });
-      const started = Date.now();
-      let r;
-      try {
-        r =
-          part === "database"
-            ? await restoreDatabase(point, project, { bin, env, admin, mode, onEvent })
-            : await restoreFiles(point, project, { bin, env, mode, origin, target: copyFolder(p, app, point.id), onEvent });
-      } catch (err) {
-        r = { ok: false, error: err.message, hint: err.hint };
-      }
-      r.seconds = Math.round((Date.now() - started) / 100) / 10;
-      result[part] = r;
-      if (!r.ok) result.ok = false;
-      onEvent({ type: "part-done", part, result: r });
+    // Restored folders the app's account can no longer write into (Windows).
+    if (mode !== "copy" && result.files?.ok && service?.account) {
+      const access = await checkWriteAccess(result.files.paths, service.account).catch(() => null);
+      if (access) result.files.access = { account: service.account, folders: access };
     }
     if (mode === "replace" && result.ok) await recordReplace(app, null, p);
     return result;

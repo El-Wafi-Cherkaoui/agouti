@@ -359,6 +359,78 @@ test("a folder outside the app: backed up, restored as a copy, in place, and one
   assert.equal((await readFile(one)).length, 300);
 });
 
+// A stand-in systemctl for the app's service. It notes, at stop and at start, whether
+// the stray upload is still there: the app must be stopped before anything changes,
+// and started only after the restore.
+async function fakeService(root, dir, { active = "active", failStop = false } = {}) {
+  const log = join(root, "service.log");
+  const bin = join(root, "systemctl");
+  const stray = join(dir, "storage/app/public/stray.txt");
+  await writeFile(
+    bin,
+    `#!/bin/sh
+state() { if [ -e "${stray}" ]; then echo before; else echo after; fi; }
+case "$1" in
+  show) printf 'LoadState=loaded\nActiveState=${active}\nUser=www-data\n' ;;
+  stop) echo "stop $2 $(state)" >> "${log}"; ${failStop ? 'echo "Failed to stop $2: Access denied" >&2; exit 1' : ""} ;;
+  start) echo "start $2 $(state)" >> "${log}" ;;
+esac
+`,
+  );
+  await chmod(bin, 0o755);
+  process.env.AGOUTI_SYSTEMCTL = bin;
+  return { log: async () => (await readFile(log, "utf8").catch(() => "")).trim().split("\n").filter(Boolean) };
+}
+
+test("replace stops the app's service before changing anything, and starts it after", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { root, p, dir, config } = await setup();
+  config.projects.shop.service = "shop.service";
+  await saveConfig(config, p);
+  await writeFile(join(dir, "storage/app/public/stray.txt"), "added after the backup");
+  const svc = await fakeService(root, dir);
+  const events = [];
+  try {
+    const r = await restoreApp({ app: "shop", mode: "replace" }, { p, onEvent: (e) => events.push(e.type) });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.service, { name: "shop.service", account: "www-data", exists: true, wasRunning: true, started: true });
+    assert.deepEqual(await svc.log(), ["stop shop.service before", "start shop.service after"]);
+    assert.ok(events.indexOf("service-stop") < events.indexOf("safety-start"), "stopped before the safety point, so nothing written after it is lost");
+    assert.ok(events.indexOf("service-started") > events.lastIndexOf("part-done"));
+    assert.equal(r.files.access, undefined, "the write check is for Windows");
+
+    // A copy never touches the app.
+    await rm(join(root, "service.log"), { force: true });
+    await restoreApp({ app: "shop", parts: ["database"] }, { p });
+    assert.deepEqual(await svc.log(), []);
+  } finally {
+    delete process.env.AGOUTI_SYSTEMCTL;
+  }
+});
+
+test("a service that won't stop: nothing is replaced; one that isn't running is left alone", async (t) => {
+  if (!restic) return t.skip("restic unavailable");
+  const { root, p, dir, config } = await setup();
+  config.projects.shop.service = "shop.service";
+  await saveConfig(config, p);
+  await writeFile(join(dir, "storage/app/public/stray.txt"), "added after the backup");
+  try {
+    let svc = await fakeService(root, dir, { failStop: true });
+    await assert.rejects(restoreApp({ app: "shop", mode: "replace" }, { p }), /Couldn't stop the service shop.service: Failed to stop shop.service: Access denied, so nothing was replaced/);
+    assert.ok(existsSync(join(dir, "storage/app/public/stray.txt")), "live files untouched");
+    assert.deepEqual(await svc.log(), ["stop shop.service before"], "not started: it was never stopped");
+
+    await rm(join(root, "service.log"));
+    svc = await fakeService(root, dir, { active: "inactive" });
+    const r = await restoreApp({ app: "shop", mode: "replace", parts: ["files"] }, { p });
+    assert.equal(r.ok, true);
+    assert.equal(r.service.wasRunning, false);
+    assert.deepEqual(await svc.log(), [], "a stopped app stays stopped");
+  } finally {
+    delete process.env.AGOUTI_SYSTEMCTL;
+  }
+});
+
 test("retention never lets a safety point push out a regular backup, and drops it after a week", async (t) => {
   if (!restic) return t.skip("restic unavailable");
   const { p, config } = await setup();

@@ -260,3 +260,45 @@ test("the same directory or name can't be added twice", async () => {
   await captured(add);
   await assert.rejects(captured(add), /already added as "shop"/);
 });
+
+test("an app run by a service: offered to stop during restores, saved, and shown", async () => {
+  const { p, dir } = await setup();
+  const found = [{ name: "SchoolClinic", display: "School Clinic", account: "NT AUTHORITY\\NetworkService", running: true }];
+  const ask = scripted([
+    ["input", /Name/, "clinic"],
+    ["select", /How should Agouti connect/, "manual"],
+    ["input", /Host/, "127.0.0.1"],
+    ["input", /Port/, "3306"],
+    ["input", /Database name/, "school_clinic"],
+    ["input", /Username/, "agouti_clinic"],
+    ["password", /Password/, "pw"],
+    ["checkbox", /Which folders/, ["storage/app/public"]],
+    ["input", /Other folders/, ""],
+    ["select", /Stop it while a restore replaces/, (o) => (assert.deepEqual(o.choices.map((c) => c.value), ["SchoolClinic", ""]), "SchoolClinic")],
+    ["confirm", /Add clinic/, true],
+    ["confirm", /first backup/, false],
+  ]);
+  const out = await captured(() => addFlow(ask, { p, dir, services: async (d) => (assert.equal(d, dir), found) }));
+  assert.deepEqual(ask.remaining, []);
+  assert.match(out, /runs as a service: SchoolClinic \(School Clinic\), runs as NT AUTHORITY\\NetworkService/);
+  assert.match(out, /Service\s+SchoolClinic/);
+  assert.equal((await loadConfig(p)).projects.clinic.service, "SchoolClinic");
+
+  // No service found: no question, nothing saved.
+  const { p: p2, dir: dir2 } = await setup();
+  const ask2 = scripted([
+    ["input", /Name/, "shop"],
+    ["select", /How should Agouti connect/, "manual"],
+    ["input", /Host/, "127.0.0.1"],
+    ["input", /Port/, "3306"],
+    ["input", /Database name/, "shop"],
+    ["input", /Username/, "u"],
+    ["password", /Password/, "pw"],
+    ["checkbox", /Which folders/, []],
+    ["input", /Other folders/, ""],
+    ["confirm", /Add shop/, true],
+    ["confirm", /first backup/, false],
+  ]);
+  await captured(() => addFlow(ask2, { p: p2, dir: dir2, services: async () => [] }));
+  assert.equal((await loadConfig(p2)).projects.shop.service, undefined);
+});

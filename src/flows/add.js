@@ -1,6 +1,6 @@
 // "Add an app", interactive. Used by the app's home screen and by `agouti add`
 // in a terminal. The non-interactive command calls the same core in projects.js.
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { requireConfig } from "../config.js";
 import { runBackup } from "./backup.js";
 import { detectApp, dirStats, fileCandidates, findApps, formatBytes, suggestName } from "../detect.js";
@@ -10,12 +10,13 @@ import { backupUserName, backupUserSql, clientFlavor, createBackupUser, generate
 import { adminConnection } from "../restore.js";
 import { askAdmin } from "./restore.js";
 import { paths } from "../paths.js";
+import { checkWriteAccess, findServices } from "../services.js";
 import { discardDatabase, prepareDatabase, saveProject, validateAppDir, validateFolders, validateName } from "../projects.js";
 import { UserError, bold, dim, info, ok, red, warn, yellow } from "../ui.js";
 
 export class Cancelled extends Error {}
 
-export async function addFlow(ask, { p = paths(), dir } = {}) {
+export async function addFlow(ask, { p = paths(), dir, services = findServices } = {}) {
   const config = await requireConfig(p);
 
   dir = await askAppDir(ask, config, dir);
@@ -32,13 +33,15 @@ export async function addFlow(ask, { p = paths(), dir } = {}) {
   try {
     db = await askDatabase(ask, { app, name, p });
     const files = await askFiles(ask, dir, app);
+    const service = await askService(ask, dir, files, services);
 
     info(`\n${bold(name)}  ${dim(dir)}`);
     info(`  Database  ${db.settings.database} @ ${db.settings.socket ?? `${db.settings.host}:${db.settings.port}`} as ${db.settings.username}`);
     info(`  Files     ${files.length ? files.join(", ") : dim("none (database only)")}`);
+    if (service) info(`  Service   ${service} ${dim("(stopped while a restore replaces live data)")}`);
     if (!(await ask.confirm({ message: `Add ${name}?`, default: true }))) throw new Cancelled();
 
-    await saveProject({ name, dir, framework: app.framework, db: db.settings, source: db.source, files }, p);
+    await saveProject({ name, dir, framework: app.framework, db: db.settings, source: db.source, files, service }, p);
   } catch (err) {
     await discardDatabase(name, p);
     if (err instanceof Cancelled) {
@@ -289,4 +292,31 @@ async function askFiles(ask, dir, app) {
       info(`${red("✕")} ${err.message}`);
     }
   }
+}
+
+// ── Service ──────────────────────────────────────────────────────────────────
+
+// The service that runs the app (Windows: found through NSSM's AppDirectory or a
+// wrapper .exe in the app folder). A restore that replaces live data stops it first.
+async function askService(ask, dir, files, find) {
+  const found = await find(dir);
+  if (!found.length) return undefined;
+  const runs = (s) => `${s.name}${s.display && s.display !== s.name ? ` (${s.display})` : ""}, runs as ${s.account ?? "?"}${s.running ? "" : ", stopped now"}`;
+  info(`\nThis app runs as a service: ${found.map(runs).join("; ")}.`);
+  const choice = await ask.select({
+    message: "Stop it while a restore replaces the app's data?",
+    choices: [
+      ...found.map((s) => ({ value: s.name, name: `Yes, stop ${s.name} and start it again after (recommended)`, description: "So the app doesn't write into half-restored data." })),
+      { value: "", name: "No, leave it running" },
+    ],
+  });
+  if (!choice) return undefined;
+  // Can its account write into the upload folders now? If not, the app is already
+  // failing to save files: better said here than found after a restore.
+  const account = found.find((s) => s.name === choice).account;
+  const access = await checkWriteAccess(files.map((f) => resolve(dir, f)), account).catch(() => null);
+  for (const f of access ?? []) {
+    if (!f.ok) warn(`${account} can't write into ${f.folder}, so the app may already fail to save files there. To allow it, as an administrator: ${f.fix}`);
+  }
+  return choice;
 }

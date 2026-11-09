@@ -14,6 +14,7 @@ import { clearLaravelCache } from "../laravel.js";
 import { flaggedPoints } from "../state.js";
 import { onDisk } from "../names.js";
 import { ensureRestic, resticEnv } from "../restic.js";
+import { accountSids, grantAccess, startCommand } from "../services.js";
 import { UserError, bold, dim, green, info, localNote, red, shellQuote, warn, yellow } from "../ui.js";
 
 export async function restoreFlow(ask, { p = paths(), app } = {}) {
@@ -85,7 +86,27 @@ export async function restoreFlow(ask, { p = paths(), app } = {}) {
   const admin = parts.includes("database") ? await askAdmin(ask, project, p) : undefined;
   info("");
   const result = await runRestore({ app, point: point.id, parts, mode, admin }, { p });
+  await fixAccess(ask, result);
   await afterReplace(ask, project, result);
+}
+
+// Restored folders the app's service account can't write into: offer to grant it.
+export async function fixAccess(ask, result) {
+  const access = result?.files?.access;
+  const blocked = access?.folders.filter((f) => !f.ok) ?? [];
+  if (!blocked.length) return;
+  warn(`${access.account} (the account ${result.service.name} runs as) can't write into: ${blocked.map((f) => f.folder).join(", ")}. The app may fail to save uploads.`);
+  if (!(await ask.confirm({ message: `Give ${access.account} write access there now?`, default: true }))) {
+    return info(dim(`To do it yourself, as an administrator:\n${blocked.map((f) => `  ${f.fix}`).join("\n")}`));
+  }
+  for (const f of blocked) {
+    try {
+      grantAccess(f.folder, accountSids(access.account)[0]);
+      info(`${green("✓")} ${access.account} can write into ${bold(f.folder)}`);
+    } catch (err) {
+      warn(`${err.message}. Run it yourself: ${f.fix}`);
+    }
+  }
 }
 
 // After the live database was replaced: a Laravel app may still serve cached data
@@ -128,7 +149,7 @@ ${parts.includes("database") ? `  · database ${bold(project.database.name)}: dr
     parts.includes("files") ? `  · ${project.files.map((f) => bold(f)).join(", ")}: made identical to the backup. Files added since are deleted${project.exclude?.length ? ", except those left out by exclude rules, which stay as they are" : ""}.\n` : ""
   }
 ${parts.includes("database") ? "Agouti first tries this backup in a throwaway database, and stops if it doesn't load.\n" : ""}Before replacing, it makes a restore point of the current state, so this can be undone.
-Put the app in maintenance mode first if it's live (Laravel: php artisan down).
+${project.service ? `${bold(project.service)} is stopped while the data is replaced, and started again after.` : "Put the app in maintenance mode first if it's live (Laravel: php artisan down)."}
 `);
   const typed = await ask.input({ message: `Type ${bold(app)} to confirm (anything else cancels)` });
   return typed.trim() === app;
@@ -326,6 +347,14 @@ export async function runRestore(opts, { p = paths(), live = process.stdout.isTT
         info(`${green("✓")} The backup loads correctly`);
       }
       if (e.type === "safety-start") info(dim("Saving the current state first, so this can be undone..."));
+      if (e.type === "service-stop") info(dim(`Stopping ${e.name}, so the app doesn't write while its data is replaced...`));
+      if (e.type === "service-not-running") info(dim(e.exists ? `${e.name} isn't running: nothing to stop.` : `There's no service ${e.name} on this server: the app isn't stopped during the restore.`));
+      if (e.type === "service-start") info(dim(`Starting ${e.name} again...`));
+      if (e.type === "service-started") {
+        clear();
+        if (e.service.started) info(`${green("✓")} ${e.service.name} is running again`);
+        else info(`${red("✕")} ${e.service.error}. Start it yourself: ${bold(startCommand(e.service.name))}`);
+      }
       if (e.type === "part-start" && opts.mode === "replace") info(`Replacing the live ${e.part}${e.part === "database" ? "" : " (the backed-up folders)"}... ${dim("(from here, Ctrl-C asks before stopping)")}`);
       if (e.type === "safety-done") {
         const r = e.result;
@@ -400,8 +429,10 @@ function nextSteps(r, admin) {
     if (r.files?.ok) lines.push(`Copy back what you need from ${r.files.path}${isWindows() ? "" : " (sudo cp -a keeps owners)"}, then delete it.`);
   } else if (r.mode === "replace") {
     if (r.safety?.ok) lines.push(`To undo: sudo agouti restore ${r.app} --point ${r.safety.point} --replace`);
-    if (r.ok && r.framework !== "laravel") lines.push("Clear the app's caches if it has any, then bring it back up.");
-    if (r.ok && r.framework === "laravel") lines.push("Bring the app back up (php artisan up) once you've checked it.");
+    for (const f of r.files?.access?.folders ?? []) if (!f.ok) lines.push(`${r.files.access.account} can't write into ${f.folder}. As an administrator: ${f.fix}`);
+    // With a service, Agouti stopped and started the app itself.
+    if (r.ok && !r.service && r.framework !== "laravel") lines.push("Clear the app's caches if it has any, then bring it back up.");
+    if (r.ok && !r.service && r.framework === "laravel") lines.push("Bring the app back up (php artisan up) once you've checked it.");
   }
   if (lines.length) info(dim(`\n${lines.join("\n")}`));
 }
