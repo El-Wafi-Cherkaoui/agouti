@@ -6,7 +6,7 @@
 
 Set it up in ten minutes. Forget about it. Trust it on the worst day.
 
-> **Status:** in development, and not published yet: `npm install -g agouti` only gets a placeholder for now. The commands below work from a checkout of this repository. Sections marked *planned* aren't built.
+> **Status:** beta. Install it with `npm install -g agouti@next` (plain `npm install -g agouti` still gets a placeholder until 0.1.0). Sections marked *planned* aren't built.
 
 </div>
 
@@ -21,12 +21,16 @@ Agouti backs up each app's **MySQL/MariaDB database and its uploaded files** (pu
 ## Install
 
 ```sh
-npm install -g agouti
+npm install -g agouti@next
 ```
 
-A single binary that doesn't need Node.js and a Docker image are planned too.
+Needs Node.js 20.17 or later. A single binary that doesn't need Node.js and a Docker image are planned too.
 
-Runs on Linux servers. Needs `bzip2` (to unpack restic) and `mysqldump` or `mariadb-dump` on the server (`apt install bzip2 mysql-client`, or `mariadb-client`). A database inside a Docker container isn't supported directly yet: its port must be reachable from the server.
+**Linux servers:** needs `bzip2` (to unpack restic) and `mysqldump` or `mariadb-dump` (`apt install bzip2 mysql-client`, or `mariadb-client`). Run Agouti with `sudo`.
+
+**Windows Server** (2016 and later): needs MySQL's `mysql.exe` and `mysqldump.exe`, which come with MySQL Server (Agouti finds them in `C:\Program Files\MySQL\...`). Run Agouti from a terminal opened with "Run as administrator", or over SSH as an administrator, and type `agouti` where this page says `sudo agouti`. Agouti keeps its settings in `C:\ProgramData\Agouti`, readable by Administrators only, and runs automatic backups as a Task Scheduler task.
+
+A database inside a Docker container isn't supported directly yet: its port must be reachable from the server.
 
 ## Get started
 
@@ -96,6 +100,8 @@ $ sudo agouti schedule --daily 03:00 --healthcheck https://hc-ping.com/<uuid>
 ✓ Healthcheck: hc-ping.com/1f2e3d…. You'll be alerted if a backup fails or doesn't run.
 Logs: journalctl -u agouti-backup
 ```
+
+On Windows it's a Task Scheduler task, "Agouti backup", running as SYSTEM; the output of its last run is in `C:\ProgramData\Agouti\data\last-backup.log`.
 
 That's it. From now on, every night Agouti:
 
@@ -332,7 +338,7 @@ With binary logging on (the MySQL 8 default), MySQL only lets SUPER users create
 - Backups are **encrypted before they leave the server**.
 - **Append-only storage** (`sudo agouti protect`) means an attacker on your server can add backups but not delete or overwrite them. See [Protect backups from attackers](#protect-backups-from-attackers).
 - Database passwords go through a private option file, never the command line, where `ps` could show them.
-- `agouti add` asks before reading your app's `.env`, keeps only the database settings from it, and recommends a MySQL user that can **only read** what a backup needs (it gives you the SQL).
+- `agouti add` asks before reading your app's `.env`, keeps only the database settings from it, and recommends a MySQL user that can **only read** what a backup needs (Agouti creates it with an admin login used once and not kept, or gives you the SQL).
 - Restores are copies unless you choose to replace, and replacing needs the app's name typed. The state before a replace is saved as a restore point first, so it can be undone.
 
 ## Under the hood
