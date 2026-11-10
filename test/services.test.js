@@ -67,14 +67,22 @@ test("write access, read from the folder's permissions", () => {
 // On a real Windows (CI): Get-Acl's SDDL as Windows writes it, and the fix with icacls.
 test("Windows: a folder NetworkService can't write into is found, and fixed", { skip: process.platform !== "win32" }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "agouti-acl-"));
-  // Only SYSTEM and Administrators, as after tightening a parent and losing the entry.
-  const r = spawnSync("icacls", [dir, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"], { encoding: "utf8" });
+  // Only SYSTEM, Administrators and the test's own user (so it can still read the
+  // folder when not elevated), as after tightening a parent and losing the entry.
+  const me = spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }).stdout.trim().split(",").at(-1).replace(/"/g, "");
+  assert.match(me, /^S-1-5-/);
+  const r = spawnSync("icacls", [dir, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", `*${me}:(OI)(CI)F`], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr || r.stdout);
   const [before] = await checkWriteAccess([dir], "NT AUTHORITY\\NetworkService");
+  assert.ok(before, "the folder was checked");
   assert.equal(before.ok, false);
   assert.match(before.fix, /icacls ".*" \/grant "\*S-1-5-20:\(OI\)\(CI\)M"/);
   grantAccess(dir, NS);
   assert.deepEqual(await checkWriteAccess([dir], "NT AUTHORITY\\NetworkService"), [{ folder: dir, ok: true }]);
   assert.deepEqual(await checkWriteAccess([dir], "LocalSystem"), [{ folder: dir, ok: true }]);
   assert.deepEqual(await findServices(dir), [], "no service runs from a new folder");
+  // A folder whose permissions can't be read is reported, not skipped.
+  const [missing] = await checkWriteAccess([join(dir, "gone")], "NT AUTHORITY\\NetworkService");
+  assert.equal(missing.ok, null);
+  assert.ok(missing.error);
 });

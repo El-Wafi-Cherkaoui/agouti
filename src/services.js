@@ -181,17 +181,20 @@ export function canWrite(sddl, sids) {
   return allowFolder && allowFiles;
 }
 
-// For each folder: { folder, ok } or { folder, ok: false, fix } with the icacls command
-// that grants the account Modify there. null when it can't be told (another account,
-// not Windows).
+// For each folder: { folder, ok: true }, { folder, ok: false, fix } with the icacls
+// command that grants the account Modify there, or { folder, ok: null, error } when its
+// permissions couldn't be read. null when it can't be told (another account, not Windows).
 export async function checkWriteAccess(folders, account) {
   if (!isWindows()) return null;
   const sids = accountSids(account);
   if (!sids) return null;
   const out = [];
   for (const folder of folders) {
-    const r = await powershell("(Get-Acl -LiteralPath $env:AGOUTI_FOLDER).Sddl", { AGOUTI_FOLDER: folder });
-    if (r.code !== 0) continue;
+    const r = await powershell("(Get-Acl -LiteralPath $env:AGOUTI_FOLDER -ErrorAction Stop).Sddl", { AGOUTI_FOLDER: folder }).catch((err) => ({ code: -1, stderr: err.message }));
+    if (r.code !== 0 || !r.stdout.includes("D:")) {
+      out.push({ folder, ok: null, error: lastLine(r.stderr) || "no permissions returned" });
+      continue;
+    }
     const ok = canWrite(r.stdout.trim(), sids);
     out.push(ok ? { folder, ok } : { folder, ok, fix: grantCommand(folder, sids[0]) });
   }

@@ -93,7 +93,8 @@ export async function restoreFlow(ask, { p = paths(), app } = {}) {
 // Restored folders the app's service account can't write into: offer to grant it.
 export async function fixAccess(ask, result) {
   const access = result?.files?.access;
-  const blocked = access?.folders.filter((f) => !f.ok) ?? [];
+  for (const f of access?.folders ?? []) if (f.ok === null) warn(`Couldn't check whether ${access.account} can write into ${f.folder}: ${f.error}`);
+  const blocked = access?.folders.filter((f) => f.ok === false) ?? [];
   if (!blocked.length) return;
   warn(`${access.account} (the account ${result.service.name} runs as) can't write into: ${blocked.map((f) => f.folder).join(", ")}. The app may fail to save uploads.`);
   if (!(await ask.confirm({ message: `Give ${access.account} write access there now?`, default: true }))) {
@@ -429,7 +430,7 @@ function nextSteps(r, admin) {
     if (r.files?.ok) lines.push(`Copy back what you need from ${r.files.path}${isWindows() ? "" : " (sudo cp -a keeps owners)"}, then delete it.`);
   } else if (r.mode === "replace") {
     if (r.safety?.ok) lines.push(`To undo: sudo agouti restore ${r.app} --point ${r.safety.point} --replace`);
-    for (const f of r.files?.access?.folders ?? []) if (!f.ok) lines.push(`${r.files.access.account} can't write into ${f.folder}. As an administrator: ${f.fix}`);
+    for (const f of r.files?.access?.folders ?? []) if (f.ok === false) lines.push(`${r.files.access.account} can't write into ${f.folder}. As an administrator: ${f.fix}`);
     // With a service, Agouti stopped and started the app itself.
     if (r.ok && !r.service && r.framework !== "laravel") lines.push("Clear the app's caches if it has any, then bring it back up.");
     if (r.ok && !r.service && r.framework === "laravel") lines.push("Bring the app back up (php artisan up) once you've checked it.");

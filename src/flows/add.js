@@ -316,7 +316,8 @@ async function askService(ask, dir, files, find) {
   const account = found.find((s) => s.name === choice).account;
   const access = await checkWriteAccess(files.map((f) => resolve(dir, f)), account).catch(() => null);
   for (const f of access ?? []) {
-    if (!f.ok) warn(`${account} can't write into ${f.folder}, so the app may already fail to save files there. To allow it, as an administrator: ${f.fix}`);
+    if (f.ok === null) warn(`Couldn't check whether ${account} can write into ${f.folder}: ${f.error}`);
+    if (f.ok === false) warn(`${account} can't write into ${f.folder}, so the app may already fail to save files there. To allow it, as an administrator: ${f.fix}`);
   }
   return choice;
 }
