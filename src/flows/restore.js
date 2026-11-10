@@ -175,18 +175,36 @@ export const forgetAdminLogins = () => session.clear();
 export async function askAdmin(ask, project, p, { need = "that can create databases", cancelled = "Restore cancelled: no MySQL user to restore with." } = {}) {
   const key = serverKey(project.database);
   const kept = session.get(key);
+  let other = false;
   if (kept) {
     if (await canConnect(project, { ...kept, p })) {
-      info(dim(`Using the MySQL login ${kept.user} given earlier (kept in memory until Agouti closes).`));
-      return kept;
+      // Ask each time: an admin login used without a word is a surprise, and whoever
+      // sits at an open session shouldn't get it for free.
+      const use = await ask.select({
+        message: `Use the MySQL admin login ${kept.user}@${kept.host} you gave earlier?`,
+        choices: [
+          { value: "yes", name: "Yes", description: "Its password is kept in memory until you quit Agouti." },
+          { value: "other", name: "No, use a different login" },
+          { value: "forget", name: "No, forget it and stop here", description: "Agouti asks for the password again next time it's needed." },
+        ],
+      });
+      if (use === "yes") return kept;
+      session.delete(key);
+      if (use === "forget") throw new UserError(`${cancelled} The MySQL admin login was forgotten.`);
+      other = true;
+    } else {
+      session.delete(key); // its password changed meanwhile
     }
-    session.delete(key); // its password changed meanwhile
   }
-  if (await canConnect(project, { p })) return {};
+  if (!other && (await canConnect(project, { p }))) return {};
 
   const saved = (await loadDefaults(p))[key];
   info(`
-This needs a MySQL admin ${need}. ${isWindows() ? "Logging in as root without a\npassword didn't work" : "Logging in as root through\nthe local socket didn't work"}, so give a MySQL admin login (and its server).
+This needs a MySQL admin ${need}. ${
+    other
+      ? "Give the MySQL admin login to use (and its server)."
+      : `${isWindows() ? "Logging in as root without a\npassword didn't work" : "Logging in as root through\nthe local socket didn't work"}, so give a MySQL admin login (and its server).`
+  }
 `);
   explainAdminPassword(p);
   const db = project.database;
@@ -223,7 +241,8 @@ function explainAdminPassword(p) {
     there, so it never appears on a command line or in the list of running
     programs. The file is deleted as soon as the work is done (or, if Agouti was
     cut off, the next time it needs an admin login).
-  • Until you quit Agouti, it stays in memory, so you aren't asked again.
+  • Until you quit Agouti, it stays in memory, so you don't type it again: Agouti
+    asks before each new use, and you can tell it to forget it there.
     Next time, the server and user name are filled in for you; the password isn't.
   • Only * is shown as you type.
 `);

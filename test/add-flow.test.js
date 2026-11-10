@@ -169,7 +169,9 @@ exec "${orig}" "$@"
     ["select", /How should Agouti connect/, "backup-user"],
     ["input", /Database name/, "shop_prod"],
     ["select", /Create it how/, "agouti"],
-    // Asked once: the login is kept in memory for the rest of the session.
+    // Typed once: the login is kept in memory for the rest of the session, and
+    // Agouti asks before using it again.
+    ["select", /Use the MySQL admin login root@localhost you gave earlier/, "yes"],
     ["checkbox", /Which folders/, ["storage/app/public"]],
     ["input", /Other folders/, ""],
     ["confirm", /Add shop/, true],
@@ -184,7 +186,6 @@ exec "${orig}" "$@"
   assert.deepEqual(ask.remaining, []);
   assert.match(out, /This needs a MySQL admin that can create users/);
   assert.match(out, /How Agouti handles this password:[\s\S]*never saved[\s\S]*never appears on a command line/);
-  assert.match(out, /Using the MySQL login root given earlier \(kept in memory until Agouti closes\)/);
   assert.match(out, /There's no database missing on this MySQL server/);
   assert.match(out, /Created agouti_shop: it can read shop_prod/);
   const args = await readFile(argsLog, "utf8");
@@ -224,6 +225,25 @@ exec "${orig}" "$@"
     assert.match(login, /How Agouti handles this password/);
     // ...but not once it's known in this session.
     assert.equal(await captured(() => adminNotice(local, p)), "");
+    // Reused only when the user says so: another login...
+    const other = scripted([
+      ["select", /Use the MySQL admin login root@localhost you gave earlier/, "other"],
+      ["input", /MySQL server/, "localhost:3307"],
+      ["input", /MySQL admin user/, "root"],
+      ["password", /Password of root/, "r00t-secret"],
+    ]);
+    assert.match(await captured(() => askAdmin(other, local, p)), /Give the MySQL admin login to use/);
+    assert.deepEqual(other.remaining, []);
+    // ...or forgotten, which stops here and asks for the password next time.
+    const forget = scripted([["select", /you gave earlier/, "forget"]]);
+    await assert.rejects(askAdmin(forget, local, p, { cancelled: "No backup user was created." }), /No backup user was created\. The MySQL admin login was forgotten\./);
+    const fresh = scripted([
+      ["input", /MySQL server/, "localhost:3307"],
+      ["input", /MySQL admin user/, "root"],
+      ["password", /Password of root/, "r00t-secret"],
+    ]);
+    await captured(() => askAdmin(fresh, local, p));
+    assert.deepEqual(fresh.remaining, []);
   } finally {
     process.env.AGOUTI_MYSQL = orig;
   }
