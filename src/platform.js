@@ -12,6 +12,13 @@ import { posix, win32 } from "node:path";
 export const isWindows = (platform = process.platform) => platform === "win32";
 export const pathFor = (platform = process.platform) => (isWindows(platform) ? win32 : posix);
 
+// The environment for Windows PowerShell (powershell.exe). Started from PowerShell 7,
+// it inherits PSModulePath pointing at 7's modules, which it can't load: Get-Acl,
+// Stop-Service and the like then fail. Without the variable it builds its own path.
+export function windowsPowershellEnv(env = process.env) {
+  return Object.fromEntries(Object.entries(env).filter(([k]) => k.toUpperCase() !== "PSMODULEPATH"));
+}
+
 // C:\inetpub\shop -> /C/inetpub/shop (Windows); unchanged elsewhere.
 export function toSnapshotPath(path, platform = process.platform) {
   if (!isWindows(platform)) return path;

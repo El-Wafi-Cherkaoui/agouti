@@ -75,7 +75,7 @@ test("Windows: a folder NetworkService can't write into is found, and fixed", { 
   assert.equal(r.status, 0, r.stderr || r.stdout);
   const [before] = await checkWriteAccess([dir], "NT AUTHORITY\\NetworkService");
   assert.ok(before, "the folder was checked");
-  assert.equal(before.ok, false);
+  assert.equal(before.ok, false, before.error);
   assert.match(before.fix, /icacls ".*" \/grant "\*S-1-5-20:\(OI\)\(CI\)M"/);
   grantAccess(dir, NS);
   assert.deepEqual(await checkWriteAccess([dir], "NT AUTHORITY\\NetworkService"), [{ folder: dir, ok: true }]);

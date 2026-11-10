@@ -1,7 +1,7 @@
 // Windows rules, checked on any system (each helper takes the platform).
 import assert from "node:assert/strict";
 import test from "node:test";
-import { escapePattern, fromSnapshotPath, relativePosix, toSnapshotPath } from "../src/platform.js";
+import { escapePattern, fromSnapshotPath, relativePosix, toSnapshotPath, windowsPowershellEnv } from "../src/platform.js";
 import { includePattern } from "../src/names.js";
 import { defaultDirs } from "../src/paths.js";
 import { stdinPath } from "../src/restore.js";
@@ -111,4 +111,10 @@ test("the command to look at a restored database uses the login the restore used
   assert.equal(mysqlLookCommand("shop_restored", {}, { windows: true, client: "mysql" }), "mysql -u root -p shop_restored");
   assert.equal(mysqlLookCommand("shop_restored", {}, { windows: false, client: "mysql" }), "mysql shop_restored");
   assert.equal(mysqlLookCommand("x", { user: "admin", host: "db.lan", port: 3306 }, { windows: false, client: "mariadb" }), "mariadb -u admin -p -h db.lan x");
+});
+
+test("Windows PowerShell doesn't inherit PowerShell 7's module path", () => {
+  const env = windowsPowershellEnv({ Path: "C:\\x", PSModulePath: "C:\\pwsh7\\Modules", AGOUTI_FOLDER: "D:\\up" });
+  assert.deepEqual(env, { Path: "C:\\x", AGOUTI_FOLDER: "D:\\up" });
+  assert.deepEqual(windowsPowershellEnv({ psmodulepath: "x", A: "1" }), { A: "1" });
 });

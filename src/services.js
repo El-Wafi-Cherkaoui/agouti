@@ -4,7 +4,7 @@
 // under it. Also: can the service's account still write into a restored folder?
 import { spawnSync } from "node:child_process";
 import { isAbsolute, normalize, relative } from "node:path";
-import { isWindows } from "./platform.js";
+import { isWindows, windowsPowershellEnv } from "./platform.js";
 import { run } from "./restic.js";
 import { UserError } from "./ui.js";
 
@@ -20,7 +20,7 @@ export function validateServiceName(name) {
 
 async function powershell(script, env = {}) {
   const r = await run(POWERSHELL, ["-NoProfile", "-NonInteractive", "-Command", `$ProgressPreference='SilentlyContinue'; ${script}`], {
-    env: { ...process.env, ...env },
+    env: { ...windowsPowershellEnv(), ...env },
     timeout: 120000,
   });
   return r;
@@ -109,7 +109,7 @@ export async function startService(name, env = process.env) {
 // For the Ctrl-C path, which can't wait for promises.
 export function startServiceSync(name, env = process.env) {
   const r = isWindows()
-    ? spawnSync(POWERSHELL, ["-NoProfile", "-NonInteractive", "-Command", "Start-Service -Name $env:AGOUTI_SERVICE"], { env: { ...process.env, AGOUTI_SERVICE: name }, stdio: "ignore", timeout: 60000, windowsHide: true })
+    ? spawnSync(POWERSHELL, ["-NoProfile", "-NonInteractive", "-Command", "Start-Service -Name $env:AGOUTI_SERVICE"], { env: { ...windowsPowershellEnv(), AGOUTI_SERVICE: name }, stdio: "ignore", timeout: 60000, windowsHide: true })
     : spawnSync(systemctlBin(env), ["start", name], { env, stdio: "ignore", timeout: 60000 });
   return r.status === 0;
 }

@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { saveConfig, writeAtomic } from "./config.js";
 import { paths } from "./paths.js";
 import { run } from "./restic.js";
-import { isWindows } from "./platform.js";
+import { isWindows, windowsPowershellEnv } from "./platform.js";
 import { UserError } from "./ui.js";
 
 export const TIMER = "agouti-backup.timer";
@@ -281,7 +281,7 @@ async function taskStatus(env) {
     `lastResult = $i.LastTaskResult; lastRun = $(if ($i.LastRunTime -and $i.LastRunTime.Year -gt 2000) { $i.LastRunTime.ToString('yyyy-MM-dd HH:mm') } else { $null }) } | ConvertTo-Json -Compress`;
   let r;
   try {
-    r = await run(env.AGOUTI_POWERSHELL || "powershell", ["-NoProfile", "-NonInteractive", "-Command", script], { env });
+    r = await run(env.AGOUTI_POWERSHELL || "powershell", ["-NoProfile", "-NonInteractive", "-Command", script], { env: windowsPowershellEnv(env) });
   } catch (err) {
     return { problem: `Couldn't ask Task Scheduler: ${err.message}` };
   }
